@@ -140,17 +140,19 @@ class BotCodeManager:
         try:
             if not repo_url:
                 # Попробуем определить URL репозитория из конфигурации
-                repo_url = "https://github.com/Yaroslav858/bot.py/blob/main/bot.py"  # Заменить на реальный URL
+                repo_url = "https://github.com/Yaroslav858/bot.py.git"  
             
             temp_dir = "temp_update"
             
             # Клонируем репозиторий
             result = subprocess.run([
-                "git", "clone", "-b", branch, repo_url, temp_dir
-            ], capture_output=True, text=True, timeout=300)
+            "git", "clone", "-b", branch, "--depth", "1", repo_url, temp_dir
+        ], capture_output=True, text=True, timeout=300)
             
             if result.returncode != 0:
-                return False, f"Ошибка клонирования: {result.stderr}"
+                error_msg = result.stderr if result.stderr else result.stdout
+                logger.error(f"Ошибка клонирования: {error_msg}")
+                return False, f"Ошибка клонирования: {error_msg}"
             
             # Создаем бэкап текущего кода
             backup_success, backup_msg = await self.create_backup()
@@ -3571,14 +3573,47 @@ class EnhancedLectureBot:
                 [InlineKeyboardButton("❌ Отмена", callback_data="code_manager")]
             ])
         )
-async def confirm_restart(self, query, context):
-    """Подтверждение перезапуска"""
-    success, message = await self.code_manager.restart_bot()
-    await self.edit_message_with_cleanup(query, context, message)
+    async def confirm_restart(self, query, context):
+        """Подтверждение перезапуска"""
+        success, message = await self.code_manager.restart_bot()
+        await self.edit_message_with_cleanup(query, context, message)
 
-async def view_all_datasets(self, query, context):
-    """Показать все датасеты"""
-    datasets = self.ai_assistant.get_datasets_info()
+    async def view_all_datasets(self, query, context):
+        """Показать все датасеты"""
+        datasets = self.ai_assistant.get_datasets_info()
+        
+        if not datasets:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📚 Все датасеты\n\nНет доступных датасетов.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")]
+                ])
+            )
+            return
+        
+        message_text = "📚 Все датасеты:\n\n"
+        for i, dataset in enumerate(datasets, 1):
+            message_text += f"{i}. {dataset['filename']} ({dataset['size_mb']} MB)\n"
+        
+        keyboard = []
+        for dataset in datasets:
+            filename = dataset['filename']
+            display_name = filename[:15] + "..." if len(filename) > 15 else filename
+            
+            keyboard.append([
+                InlineKeyboardButton(f"🎯 {display_name}", callback_data=f"train_on_dataset_{filename}"),
+                InlineKeyboardButton(f"🗑️", callback_data=f"delete_dataset_{filename}")
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
     async def start_command_execution(self, query, context: ContextTypes.DEFAULT_TYPE):
