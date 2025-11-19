@@ -59,7 +59,6 @@ HUGGING_FACE_MODELS = [
 # =============================================================================
 # СИСТЕМА УДАЛЕННОГО УПРАВЛЕНИЯ КОДОМ (BotCodeManager)
 # =============================================================================
-
 class BotCodeManager:
     """Система удаленного управления кодом бота"""
     def __init__(self, bot_instance=None):
@@ -2950,21 +2949,39 @@ class Database:
             return dict(row) if row else None
     
     async def add_subject(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать добавление предмета"""
+        """Управление предметами (админ)"""
         if query.from_user.id not in ADMIN_IDS:
             await query.answer("❌ У вас нет доступа", show_alert=True)
             return
         
-        context.user_data.clear()
-        context.user_data['state'] = 'adding_subject'
+        subjects = self.db.get_all_subjects()
+        
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")]
+        ]
+        
+        if subjects:
+            for subject in subjects:
+                # Получаем количество лекций и практических
+                lectures = self.db.get_lectures(subject['id'])
+                practices = self.db.get_practices(subject['id'])
+                
+                keyboard.append([
+                    InlineKeyboardButton(f"📖 {subject['name']}", callback_data=f"view_subject_{subject['id']}"),
+                    InlineKeyboardButton(f"🗑️", callback_data=f"delete_subject_{subject['id']}")
+                ])
+                keyboard.append([
+                    InlineKeyboardButton(f"   📓 Лекций: {len(lectures)}", callback_data=f"show_lectures_{subject['id']}"),
+                    InlineKeyboardButton(f"   📝 Практических: {len(practices)}", callback_data=f"show_practices_{subject['id']}")
+                ])
+    
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
         
         await self.edit_message_with_cleanup(
             query, context,
-            "➕ Добавление нового предмета\n\n"
-            "Введите название предмета:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-            ])
+            "📖 Управление предметами\n\n"
+            f"📊 Всего предметов: {len(subjects)}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 async def handle_add_subject(self, update: Update, context: ContextTypes.DEFAULT_TYPE, subject_name: str):
@@ -4384,6 +4401,12 @@ class EnhancedLectureBot:
                 await self.handle_restart_confirmation(update, context, user_message)
             elif user_state == 'ai_chat':
                 await self.handle_ai_message(update, context)
+            elif user_state == 'adding_subject':
+                await self.handle_add_subject(update, context, user_message)
+            elif user_state == 'adding_teacher_name':
+                await self.handle_add_teacher(update, context, user_message)
+            elif user_state == 'single_upload_number':
+                await self.handle_upload_number(update, context, user_message)
             elif user_state == 'uploading_github_dataset':
                 await self.handle_github_url(update, context, user_message)
             elif user_state == 'uploading_schedule':
@@ -4911,6 +4934,8 @@ class EnhancedLectureBot:
             await self.save_schedule_file(update, context)
         elif user_state == 'uploading_useful_info':
             await self.save_useful_info_file(update, context)
+        elif user_state == 'single_upload_file':
+            await self.save_single_file(update, context)
         else:
             await self.send_message_with_cleanup(update, context, "Пожалуйста, сначала начните процесс загрузки файла через админ-панель.")
 
