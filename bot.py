@@ -3643,15 +3643,31 @@ class EnhancedLectureBot:
         # Логируем запуск бота
         logger.info(f"Пользователь {user_id} ({username}) запустил бота")
         
-        # Отправляем приветственное сообщение и главное меню
+        # Создаем клавиатуру главного меню
+        keyboard = [
+            [InlineKeyboardButton("🤖 ИИ-помощник", callback_data="ai_assistant")],
+            [InlineKeyboardButton("📚 Предметы", callback_data="subjects")],
+            [InlineKeyboardButton("📅 Расписание", callback_data="schedule")],
+            [InlineKeyboardButton("ℹ️ Полезная информация", callback_data="useful_info")],
+            [InlineKeyboardButton("👤 Ваш помощник", callback_data="helper")],
+            [InlineKeyboardButton("📞 Техподдержка", callback_data="support")],
+            [InlineKeyboardButton("💝 Пожертвования (в разработке)", callback_data="donate")],
+        ]
+        
+        if user_id in ADMIN_IDS:
+            keyboard.append([InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")])
+            keyboard.append([InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Отправляем приветственное сообщение с главным меню
         welcome_text = (
             "👋 Добро пожаловать!\n\n"
             "У меня есть множество полезных функций!\n\n"
             "Выберите действие в меню ниже:"
         )
     
-        await self.send_message_with_cleanup(update, context, welcome_text)
-        await self.show_main_menu(update, context)
+        await self.send_message_with_cleanup(update, context, welcome_text, reply_markup=reply_markup)
 
     async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать главное меню"""
