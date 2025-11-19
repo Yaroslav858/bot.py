@@ -1635,64 +1635,73 @@ class SelfLearningAI:
         return predicted_class, confidence, predictions
     
     def learn_from_data(self, X: np.ndarray, y: np.ndarray, epochs: int = 10, 
-                   batch_size: int = 32, validation_data: tuple = None):
-        """Обучение на размеченных данных"""
+                    batch_size: int = 32, validation_data: tuple = None):
+        """Обучение на размеченных данных с исправленной обработкой ошибок"""
+        
+        # ЯВНАЯ ПРОВЕРКА ДАННЫХ ВМЕСТО ТИХОГО ПРЕРЫВАНИЯ
         if len(X) == 0 or len(y) == 0:
-            logger.warning("Пустые данные для обучения")
-            return []
+            error_msg = f"❌ Пустые данные для обучения: X={len(X)}, y={len(y)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
-        # Проверяем размерности
+        # ПРОВЕРКА СОВПАДЕНИЯ РАЗМЕРОВ
         if len(X) != len(y):
-            logger.error(f"Несовпадение размеров X({len(X)}) и y({len(y)})")
-            return []
+            error_msg = f"❌ Несовпадение размеров X({len(X)}) и y({len(y)})"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
-        # Отладочная информация
-        logger.info(f"Формы данных для обучения - X: {X.shape}, y: {y.shape}")
-        logger.info(f"Уникальные классы в y: {np.unique(y)}")
-        
-        # Проверяем и обновляем размер входного слоя если нужно
-        if X.shape[1] != self.input_size:
-            logger.info(f"Обновляем размер входного слоя с {self.input_size} до {X.shape[1]}")
-            self._update_input_size(X.shape[1])
-        
-        # Преобразуем y в one-hot если нужно
-        if len(y.shape) == 1:
-            try:
-                # Убеждаемся, что все метки в допустимом диапазоне
-                unique_classes = len(np.unique(y))
-                if unique_classes > self.output_size:
-                    logger.info(f"Обновляем размер выходного слоя с {self.output_size} до {unique_classes}")
-                    self._update_output_size(unique_classes)
-                
-                # Преобразуем в one-hot encoding
-                y_onehot = np.eye(self.output_size)[y]
-                logger.info(f"One-hot encoded y: {y_onehot.shape}")
-                
-            except Exception as e:
-                logger.error(f"Ошибка преобразования y в one-hot: {e}")
-                return []
-        else:
-            y_onehot = y
-        
-        # Проверяем совпадение размеров
-        if len(X) != len(y_onehot):
-            logger.error(f"Несовпадение размеров после преобразования: X={len(X)}, y_onehot={len(y_onehot)}")
-            return []
+        # ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
+        logger.info(f"🚀 Начало обучения: {len(X)} примеров, {len(np.unique(y))} классов")
+        logger.info(f"📊 Формы данных - X: {X.shape}, y: {y.shape}")
+        logger.info(f"🎯 Уникальные классы в y: {np.unique(y)}")
         
         try:
-            # Создаем датасет и DataLoader
+            # ПРОВЕРЯЕМ И ОБНОВЛЯЕМ РАЗМЕР ВХОДНОГО СЛОЯ ЕСЛИ НУЖНО
+            if X.shape[1] != self.input_size:
+                logger.info(f"🔄 Обновляем размер входного слоя с {self.input_size} до {X.shape[1]}")
+                self._update_input_size(X.shape[1])
+            
+            # ПРЕОБРАЗУЕМ y В ONE-HOT ЕСЛИ НУЖНО
+            y_onehot = y
+            if len(y.shape) == 1:
+                try:
+                    # Убеждаемся, что все метки в допустимом диапазоне
+                    unique_classes = len(np.unique(y))
+                    if unique_classes > self.output_size:
+                        logger.info(f"🔄 Обновляем размер выходного слоя с {self.output_size} до {unique_classes}")
+                        self._update_output_size(unique_classes)
+                    
+                    # Преобразуем в one-hot encoding
+                    y_onehot = np.eye(self.output_size)[y]
+                    logger.info(f"✅ One-hot encoded y: {y_onehot.shape}")
+                    
+                except Exception as e:
+                    error_msg = f"❌ Ошибка преобразования y в one-hot: {e}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+            
+            # ФИНАЛЬНАЯ ПРОВЕРКА РАЗМЕРНОСТЕЙ
+            if len(X) != len(y_onehot):
+                error_msg = f"❌ Несовпадение размеров после преобразования: X={len(X)}, y_onehot={len(y_onehot)}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # СОЗДАЕМ ДАТАСЕТ И DATALOADER
             dataset = LearningDataset(list(zip(X, y_onehot)))
             
             # Убеждаемся, что batch_size не больше размера датасета
             actual_batch_size = min(batch_size, len(X))
             if actual_batch_size == 0:
-                logger.error("Размер батча равен 0")
-                return []
+                error_msg = "❌ Размер батча равен 0"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
                 
             dataloader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=True)
             
             self.model.train()
             epoch_losses = []
+            
+            logger.info(f"🔥 Запуск обучения на {epochs} эпох, batch_size={actual_batch_size}")
             
             for epoch in range(epochs):
                 total_loss = 0
@@ -1700,18 +1709,20 @@ class SelfLearningAI:
                 
                 for batch_X, batch_y in dataloader:
                     if len(batch_X) == 0:
+                        logger.warning("⚠️ Пустой батч, пропускаем")
                         continue
                     
-                    # Проверяем размерности
+                    # ПРОВЕРЯЕМ РАЗМЕРНОСТИ
                     if batch_X.dim() != 2:
-                        logger.warning(f"Исправляем размерность batch_X: {batch_X.shape}")
+                        logger.warning(f"🔄 Исправляем размерность batch_X: {batch_X.shape}")
                         batch_X = batch_X.view(batch_X.size(0), -1)
                     
                     batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
                     
-                    # Дополнительная проверка размерностей
+                    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА РАЗМЕРНОСТЕЙ
                     if batch_X.shape[1] != self.input_size:
-                        logger.error(f"Несоответствие входного размера: batch_X={batch_X.shape[1]}, model_input={self.input_size}")
+                        error_msg = f"❌ Несоответствие входного размера: batch_X={batch_X.shape[1]}, model_input={self.input_size}"
+                        logger.error(error_msg)
                         continue
                     
                     self.optimizer.zero_grad()
@@ -1728,29 +1739,34 @@ class SelfLearningAI:
                     avg_loss = total_loss / batch_count
                     epoch_losses.append(avg_loss)
                     
-                    # Валидация
+                    # ВАЛИДАЦИЯ
                     val_accuracy = 0
                     if validation_data:
                         val_accuracy = self.evaluate(*validation_data)
-                        logger.info(f"Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
+                        logger.info(f"📈 Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
                     else:
-                        logger.info(f"Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+                        logger.info(f"📈 Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
+                else:
+                    logger.warning(f"⚠️ Эпоха {epoch+1}: нет данных для обучения")
             
-            # Сохранение метрик
+            # СОХРАНЕНИЕ МЕТРИК
             self.performance_metrics['loss'].extend(epoch_losses)
             if validation_data:
                 self.performance_metrics['accuracy'].append(val_accuracy)
             
-            # Сохранение модели
+            # СОХРАНЕНИЕ МОДЕЛИ
             self.save_model()
+            
+            logger.info(f"✅ Обучение завершено успешно! Финальный loss: {epoch_losses[-1] if epoch_losses else 'N/A'}")
             
             return epoch_losses
             
         except Exception as e:
-            logger.error(f"Ошибка в learn_from_data: {e}")
+            error_msg = f"❌ Критическая ошибка в learn_from_data: {e}"
+            logger.error(error_msg)
             import traceback
-            logger.error(f"Трассировка ошибки: {traceback.format_exc()}")
-            return []
+            logger.error(f"🔍 Трассировка ошибки: {traceback.format_exc()}")
+            raise
 
     def _update_input_size(self, new_input_size: int):
         """Обновление размера входного слоя"""
@@ -1758,19 +1774,26 @@ class SelfLearningAI:
             # Сохраняем старые веса если возможно
             old_weights = None
             old_bias = None
-            if hasattr(self.model.layers[0], 'weight'):
-                old_weights = self.model.layers[0].weight.data.cpu().numpy()
-                old_bias = self.model.layers[0].bias.data.cpu().numpy()
+            if hasattr(self.model, 'layers') and len(self.model.layers) > 0:
+                for layer in self.model.layers:
+                    if isinstance(layer, nn.Linear):
+                        old_weights = layer.weight.data.cpu().numpy()
+                        old_bias = layer.bias.data.cpu().numpy()
+                        break
             
             # Создаем новую модель с правильным входным размером
             hidden_sizes = []
-            for layer in self.model.layers:
-                if isinstance(layer, nn.Linear):
-                    hidden_sizes.append(layer.out_features)
+            if hasattr(self.model, 'layers'):
+                for layer in self.model.layers:
+                    if isinstance(layer, nn.Linear):
+                        hidden_sizes.append(layer.out_features)
             
             # Убираем выходной слой из hidden_sizes
             if hidden_sizes and hidden_sizes[-1] == self.output_size:
                 hidden_sizes = hidden_sizes[:-1]
+            
+            if not hidden_sizes:
+                hidden_sizes = [128, 64, 32]  # значения по умолчанию
             
             # Пересоздаем модель
             self.model = NeuralNetwork(
@@ -1795,6 +1818,41 @@ class SelfLearningAI:
             ).to(self.device)
             self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
             self.input_size = new_input_size
+
+def _update_output_size(self, new_output_size: int):
+    """Обновление размера выходного слоя"""
+    try:
+        # Сохраняем старые веса
+        old_weights = self.model.output_layer.weight.data.cpu().numpy()
+        old_bias = self.model.output_layer.bias.data.cpu().numpy()
+        
+        # Создаем новый выходной слой
+        in_features = self.model.output_layer.in_features
+        self.model.output_layer = nn.Linear(in_features, new_output_size).to(self.device)
+        self.output_size = new_output_size
+        
+        # Инициализируем новый слой
+        nn.init.xavier_uniform_(self.model.output_layer.weight)
+        if self.model.output_layer.bias is not None:
+            self.model.output_layer.bias.data.zero_()
+        
+        # Копируем старые веса если возможно
+        if (old_weights.shape[0] <= new_output_size and 
+            old_weights.shape[1] == in_features and
+            old_bias.shape[0] <= new_output_size):
+            
+            self.model.output_layer.weight.data[:old_weights.shape[0]] = torch.FloatTensor(old_weights).to(self.device)
+            self.model.output_layer.bias.data[:old_bias.shape[0]] = torch.FloatTensor(old_bias).to(self.device)
+        
+        # Обновляем optimizer
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.optimizer.param_groups[0]['lr'])
+        
+        logger.info(f"Размер выходного слоя обновлен до {new_output_size}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка обновления выходного слоя: {e}")
+        # Полная пересоздание модели как запасной вариант
+        self._initialize_model(self.input_size, new_output_size)
 
     def learn_from_dataset(self, dataset_filename: str, epochs: int = 5) -> bool:
         """Обучение на загруженном датасете с поддержкой больших файлов"""
@@ -2996,6 +3054,93 @@ class EnhancedLectureBot:
         self.helper_text = "👋 Привет! Помогаю в разработке курсовых (от 2000), а также в подготовке отчетов учебных и производственных практик (от 500), проектных работ и докладов (от 200), практических заданий и конспектов (от 35). Создаю сайты (html, css, js, react, vue, django, php, nodeJS, tilda) и пишу программы (c#, pascal, python, delphia)"
         self.helper_contact = "@RaffLik"
 
+    async def diagnose_training(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Диагностика обучения датасетов"""
+        if update.effective_user.id not in ADMIN_IDS:
+            await self.send_message_with_cleanup(update, context, "❌ У вас нет доступа к этой команде")
+            return
+        
+        # Получаем список датасетов
+        datasets = self.ai_assistant.get_datasets_info()
+        
+        if not datasets:
+            await self.send_message_with_cleanup(
+                update, context,
+                "📚 Диагностика обучения\n\n❌ Нет доступных датасетов для диагностики."
+            )
+            return
+        
+        diagnostic_results = []
+        
+        for dataset in datasets[:3]:  # Проверяем первые 3 датасета
+            dataset_name = dataset['filename']
+            
+            try:
+                # 1. Проверяем существование файла
+                filepath = os.path.join("training_datasets", dataset_name)
+                if not os.path.exists(filepath):
+                    diagnostic_results.append(f"❌ {dataset_name}: Файл не найден")
+                    continue
+                
+                # 2. Проверяем размер файла
+                file_size = os.path.getsize(filepath)
+                if file_size == 0:
+                    diagnostic_results.append(f"❌ {dataset_name}: Файл пустой ({file_size} байт)")
+                    continue
+                
+                # 3. Пробуем загрузить датасет
+                X, y = self.ai_assistant.self_learning_ai.dataset_trainer.load_dataset(dataset_name)
+                
+                if len(X) == 0:
+                    diagnostic_results.append(f"❌ {dataset_name}: Не удалось извлечь данные (X пустой)")
+                    continue
+                
+                if len(y) == 0:
+                    diagnostic_results.append(f"❌ {dataset_name}: Не удалось извлечь метки (y пустой)")
+                    continue
+                
+                # 4. Проверяем размерности
+                dim_info = f"X: {X.shape}, y: {y.shape}, классы: {len(np.unique(y))}"
+                
+                # 5. Пробуем небольшое обучение (2 примера, 1 эпоха)
+                try:
+                    test_X = X[:2]  # Берем всего 2 примера для теста
+                    test_y = y[:2]
+                    
+                    losses = self.ai_assistant.self_learning_ai.learn_from_data(
+                        test_X, test_y, epochs=1, batch_size=2
+                    )
+                    
+                    if losses and len(losses) > 0:
+                        diagnostic_results.append(f"✅ {dataset_name}: ОБУЧЕНИЕ РАБОТАЕТ! {dim_info}")
+                    else:
+                        diagnostic_results.append(f"❌ {dataset_name}: Обучение не запускается {dim_info}")
+                        
+                except Exception as e:
+                    diagnostic_results.append(f"❌ {dataset_name}: Ошибка обучения: {str(e)[:100]}...")
+                    
+            except Exception as e:
+                diagnostic_results.append(f"❌ {dataset_name}: Общая ошибка: {str(e)[:100]}...")
+        
+        # Формируем итоговое сообщение
+        result_text = "🔍 Диагностика обучения датасетов\n\n"
+        result_text += "\n".join(diagnostic_results)
+        
+        # Добавляем рекомендации
+        result_text += "\n\n💡 Рекомендации:\n"
+        result_text += "• ✅ - датасет готов к обучению\n"
+        result_text += "• ❌ - требуется исправление\n"
+        result_text += "• Проверьте формат данных в проблемных датасетах"
+        
+        await self.send_message_with_cleanup(
+            update, context,
+            result_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Запустить обучение", callback_data="train_dataset")],
+                [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+            ])
+        )
     def _initialize_bot(self):
         """Инициализация улучшенного бота"""
         try:
@@ -3251,9 +3396,9 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             return
         
         keyboard = [
+            [InlineKeyboardButton("🔍 Диагностика обучения", callback_data="diagnose_training")],
             [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
             [InlineKeyboardButton("📤 Одиночная загрузка", callback_data="upload_file")],
-            [InlineKeyboardButton("📚 Массовая загрузка", callback_data="mass_upload")],
             [InlineKeyboardButton("🗑️ Удаление файлов", callback_data="delete_files")],
             [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
             [InlineKeyboardButton("👨‍🏫 Добавить преподавателя", callback_data="add_teacher")],
@@ -3416,6 +3561,8 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
                 # Обработка кликабельных кнопок просмотра логов
                 log_type = data.split("_")[2]
                 await self.show_logs_by_type(query, context, log_type)
+            elif data == "diagnose_training":
+                await self.diagnose_training(Update(update_id=0, callback_query=query), context)
             elif data == "ai_assistant":
                 await self.show_ai_chat(query, context)
             elif data == "subjects":
