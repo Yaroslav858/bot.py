@@ -8,6 +8,8 @@ import requests
 import asyncio
 import json
 import numpy as np
+from aiogram import Bot, Dispatcher, types
+from aiogram.fsm.storage.memory import MemoryStorage
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,6 +22,7 @@ import csv
 import openpyxl
 import pandas as pd
 from openpyxl import load_workbook
+from telegram import Update
 import yaml
 import xml.etree.ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -59,7 +62,6 @@ HUGGING_FACE_MODELS = [
 
 class BotCodeManager:
     """Система удаленного управления кодом бота"""
-    
     def __init__(self, bot_instance=None):
         self.bot_instance = bot_instance
         self.backup_dir = "backups"
@@ -93,7 +95,6 @@ class BotCodeManager:
                 "timestamp": datetime.now().isoformat(),
                 "status": "✅ Система работает нормально"
             }
-            
         except Exception as e:
             logger.error(f"Ошибка получения статуса системы: {e}")
             return {"error": str(e), "status": "❌ Ошибка системы"}
@@ -135,145 +136,44 @@ class BotCodeManager:
             pass
         return []
     
-    async def update_code_from_github(self, repo_url: str = None, branch: str = "main") -> Tuple[bool, str]:
-        """Обновить код из GitHub репозитория"""
+    async def cleanup_temp_files(self) -> Tuple[bool, str]:
+        """Асинхронная версия очистки временных файлов"""
         try:
-            if not repo_url:
-                # Попробуем определить URL репозитория из конфигурации
-                repo_url = "https://github.com/Yaroslav858/bot.py.git"  
+            temp_dirs = ['temp_update', 'temp_download', '__pycache__']
+            cleaned = []
             
-            temp_dir = "temp_update"
+            for temp_dir in temp_dirs:
+                if os.path.exists(temp_dir):
+                    try:
+                        if os.path.isdir(temp_dir):
+                            shutil.rmtree(temp_dir, ignore_errors=True)
+                            cleaned.append(temp_dir)
+                        else:
+                            os.remove(temp_dir)
+                            cleaned.append(temp_dir)
+                    except Exception as e:
+                        logger.warning(f"Не удалось очистить {temp_dir}: {e}")
             
-            # Клонируем репозиторий
-            result = subprocess.run([
-            "git", "clone", "-b", branch, "--depth", "1", repo_url, temp_dir
-        ], capture_output=True, text=True, timeout=300)
+            # Очищаем файлы .pyc
+            for root, dirs, files in os.walk('.'):
+                for file in files:
+                    if file.endswith('.pyc'):
+                        try:
+                            os.remove(os.path.join(root, file))
+                            cleaned.append(file)
+                        except:
+                            pass
             
-            if result.returncode != 0:
-                error_msg = result.stderr if result.stderr else result.stdout
-                logger.error(f"Ошибка клонирования: {error_msg}")
-                return False, f"Ошибка клонирования: {error_msg}"
-            
-            # Создаем бэкап текущего кода
-            backup_success, backup_msg = await self.create_backup()
-            if not backup_success:
-                return False, f"Не удалось создать бэкап: {backup_msg}"
-            
-            # Копируем новые файлы (исключая конфигурационные)
-            exclude_files = {'bot_database.db', 'self_learning_model.pth', 'config.json'}
-            
-            for item in os.listdir(temp_dir):
-                if item in exclude_files or item.startswith('.'):
-                    continue
-                    
-                src_path = os.path.join(temp_dir, item)
-                dst_path = os.path.join('.', item)
-                
-                if os.path.isdir(src_path):
-                    if os.path.exists(dst_path):
-                        shutil.rmtree(dst_path)
-                    shutil.copytree(src_path, dst_path)
-                else:
-                    shutil.copy2(src_path, dst_path)
-            
-            # Очищаем временную директорию
-            shutil.rmtree(temp_dir)
-            
-            return True, "✅ Код успешно обновлен из GitHub. Требуется перезагрузка."
-            
+            if cleaned:
+                return True, f"✅ Очищены временные файлы: {', '.join(cleaned)}"
+            else:
+                return True, "✅ Временные файлы не найдены"
         except Exception as e:
-            logger.error(f"Ошибка обновления кода: {e}")
-            return False, f"❌ Ошибка обновления: {str(e)}"
-    
-    async def restart_bot(self) -> Tuple[bool, str]:
-        """Перезапустить бота"""
-        try:
-            # Сохраняем состояние
-            if self.bot_instance:
-                await self.bot_instance.shutdown()
-            
-            # Запускаем новый процесс
-            subprocess.Popen([sys.executable, __file__])
-            
-            # Завершаем текущий процесс
-            sys.exit(0)
-            
-            return True, "✅ Бот перезапускается..."
-            
-        except Exception as e:
-            logger.error(f"Ошибка перезапуска бота: {e}")
-            return False, f"❌ Ошибка перезапуска: {str(e)}"
-    
-    async def view_file(self, file_path: str) -> Tuple[bool, str, str]:
-        """Просмотреть содержимое файла"""
-        try:
-            if not os.path.exists(file_path):
-                return False, "", f"❌ Файл не найден: {file_path}"
-            
-            # Проверяем размер файла
-            file_size = os.path.getsize(file_path)
-            if file_size > 100 * 1024:  # 100KB лимит
-                return False, "", f"❌ Файл слишком большой ({file_size} байт). Максимум 100KB."
-            
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            return True, content, f"✅ Файл прочитан: {file_path}"
-            
-        except Exception as e:
-            logger.error(f"Ошибка чтения файла: {e}")
-            return False, "", f"❌ Ошибка чтения файла: {str(e)}"
-    
-    async def edit_file(self, file_path: str, new_content: str) -> Tuple[bool, str]:
-        """Редактировать файл"""
-        try:
-            if not os.path.exists(file_path):
-                return False, f"❌ Файл не найден: {file_path}"
-            
-            # Создаем бэкап файла
-            backup_path = f"{file_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            shutil.copy2(file_path, backup_path)
-            
-            # Записываем новый контент
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(new_content)
-            
-            return True, f"✅ Файл успешно обновлен. Бэкап: {backup_path}"
-            
-        except Exception as e:
-            logger.error(f"Ошибка редактирования файла: {e}")
-            return False, f"❌ Ошибка редактирования: {str(e)}"
-    
-    async def execute_command(self, command: str) -> Tuple[bool, str, str]:
-        """Выполнить команду на сервере"""
-        try:
-            # Безопасность: ограничиваем опасные команды
-            dangerous_commands = ['rm -rf', 'format', 'dd', 'mkfs', 'chmod 777']
-            if any(cmd in command for cmd in dangerous_commands):
-                return False, "", "❌ Опасная команда запрещена"
-            
-            # Выполняем команду
-            result = subprocess.run(
-                command, 
-                shell=True, 
-                capture_output=True, 
-                text=True, 
-                timeout=30
-            )
-            
-            output = result.stdout if result.stdout else result.stderr
-            success = result.returncode == 0
-            
-            return success, output, f"Код возврата: {result.returncode}"
-            
-        except subprocess.TimeoutExpired:
-            return False, "", "❌ Команда превысила лимит времени (30 секунд)"
-        except Exception as e:
-            logger.error(f"Ошибка выполнения команды: {e}")
-            return False, "", f"❌ Ошибка выполнения: {str(e)}"
-    
-    async def create_backup(self) -> Tuple[bool, str]:
-        """Создать бэкап системы"""
+            logger.error(f"Ошибка очистки временных файлов: {e}")
+            return False, f"❌ Ошибка очистки: {str(e)}"
+        
+    def create_backup_sync(self) -> Tuple[bool, str]:
+        """Синхронная версия создания бэкапа"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_name = f"backup_{timestamp}"
@@ -318,7 +218,132 @@ class BotCodeManager:
         except Exception as e:
             logger.error(f"Ошибка создания бэкапа: {e}")
             return False, f"❌ Ошибка создания бэкапа: {str(e)}"
+
+    async def update_code_from_github(self, repo_url: str = None, branch: str = "main") -> Tuple[bool, str]:
+        """Асинхронная версия обновления кода из GitHub с улучшенной обработкой ошибок"""
+        try:
+            if not repo_url:
+                repo_url = "https://github.com/Yaroslav858/bot.py.git"  
+            
+            temp_dir = "temp_update"
+            
+            # УЛУЧШЕННАЯ ОЧИСТКА: проверяем и полностью удаляем существующую директорию
+            if os.path.exists(temp_dir):
+                logger.info(f"Удаляем существующую директорию {temp_dir}")
+                try:
+                    # Рекурсивно удаляем всю директорию
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    
+                    # Дополнительная проверка что директория удалена
+                    if os.path.exists(temp_dir):
+                        # Если не удалось удалить, пробуем другой подход
+                        import subprocess
+                        if os.name == 'nt':  # Windows
+                            subprocess.run(f'rmdir /s /q "{temp_dir}"', shell=True, capture_output=True)
+                        else:  # Linux/Mac
+                            subprocess.run(f'rm -rf "{temp_dir}"', shell=True, capture_output=True)
+                        
+                        # Ждем немного и проверяем снова
+                        await asyncio.sleep(2)
+                        
+                        if os.path.exists(temp_dir):
+                            return False, f"❌ Не удалось удалить существующую директорию {temp_dir}"
+                            
+                except Exception as e:
+                    logger.error(f"Ошибка удаления директории {temp_dir}: {e}")
+                    return False, f"❌ Ошибка удаления временной директории: {str(e)}"
     
+            # Ждем немного чтобы система освободила ресурсы
+            await asyncio.sleep(1)
+            
+            # Проверяем что директории действительно нет
+            if os.path.exists(temp_dir):
+                return False, f"❌ Директория {temp_dir} все еще существует после удаления"
+            
+            # Клонируем репозиторий
+            logger.info(f"Клонируем репозиторий {repo_url} ветка {branch}")
+            process = await asyncio.create_subprocess_exec(
+                "git", "clone", "-b", branch, "--depth", "1", repo_url, temp_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else stdout.decode()
+                logger.error(f"Ошибка клонирования: {error_msg}")
+                
+                # Очищаем директорию в случае ошибки
+                if os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except:
+                        pass
+                
+                return False, f"❌ Ошибка клонирования: {error_msg}"
+            
+            # Создаем бэкап текущего кода
+            backup_success, backup_msg = await self.create_backup()
+            if not backup_success:
+                # Очищаем временную директорию
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                return False, f"❌ Не удалось создать бэкап: {backup_msg}"
+            
+            # Копируем новые файлы (исключая конфигурационные)
+            exclude_files = {'bot_database.db', 'self_learning_model.pth', 'config.json', 'training_datasets', 'backups', 'user_dialogues'}
+            
+            copied_files = []
+            for item in os.listdir(temp_dir):
+                if item in exclude_files or item.startswith('.'):
+                    continue
+                    
+                src_path = os.path.join(temp_dir, item)
+                dst_path = os.path.join('.', item)
+                
+                try:
+                    if os.path.isdir(src_path):
+                        if os.path.exists(dst_path):
+                            logger.info(f"Удаляем существующую директорию {dst_path}")
+                            shutil.rmtree(dst_path, ignore_errors=True)
+                        logger.info(f"Копируем директорию {item}")
+                        shutil.copytree(src_path, dst_path)
+                    else:
+                        logger.info(f"Копируем файл {item}")
+                        shutil.copy2(src_path, dst_path)
+                    
+                    copied_files.append(item)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка копирования {item}: {e}")
+                    # Продолжаем копирование других файлов
+            
+            logger.info(f"Скопировано файлов: {len(copied_files)}")
+            
+            # Очищаем временную директорию
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"Не удалось очистить временную директорию: {e}")
+            
+            if copied_files:
+                return True, f"✅ Код успешно обновлен из GitHub. Скопировано файлов: {len(copied_files)}. Требуется перезагрузка."
+            else:
+                return False, "❌ Не удалось скопировать ни одного файла"
+        
+        except Exception as e:
+            logger.error(f"Ошибка обновления кода: {e}")
+            # Гарантированная очистка временной директории
+            if os.path.exists("temp_update"):
+                try:
+                    shutil.rmtree("temp_update", ignore_errors=True)
+                except:
+                    pass
+            return False, f"❌ Ошибка обновления: {str(e)}"
+
     def _get_dir_size(self, path: str) -> str:
         """Получить размер директории"""
         total = 0
@@ -348,6 +373,101 @@ class BotCodeManager:
             logger.error(f"Ошибка получения списка бэкапов: {e}")
         
         return sorted(backups, key=lambda x: x["timestamp"], reverse=True)
+
+    # Добавляем остальные методы, которые были в оригинальном классе
+    async def create_backup(self) -> Tuple[bool, str]:
+        """Асинхронная версия создания бэкапа"""
+        return self.create_backup_sync()
+
+    def view_file(self, file_path: str) -> Tuple[bool, str, str]:
+        """Просмотреть содержимое файла"""
+        try:
+            if not os.path.exists(file_path):
+                return False, "", f"❌ Файл не найден: {file_path}"
+            
+            # Проверяем размер файла
+            file_size = os.path.getsize(file_path)
+            if file_size > 100 * 1024:  # 100KB лимит
+                return False, "", f"❌ Файл слишком большой ({file_size} байт). Максимум 100KB."
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            return True, content, f"✅ Файл прочитан: {file_path}"
+            
+        except Exception as e:
+            logger.error(f"Ошибка чтения файла: {e}")
+            return False, "", f"❌ Ошибка чтения файла: {str(e)}"
+
+    async def edit_file(self, file_path: str, new_content: str) -> Tuple[bool, str]:
+        """Редактировать файл"""
+        try:
+            if not os.path.exists(file_path):
+                return False, f"❌ Файл не найден: {file_path}"
+            
+            # Создаем бэкап файла
+            backup_path = f"{file_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            shutil.copy2(file_path, backup_path)
+            
+            # Записываем новый контент
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            
+            return True, f"✅ Файл успешно обновлен. Бэкап: {backup_path}"
+            
+        except Exception as e:
+            logger.error(f"Ошибка редактирования файла: {e}")
+            return False, f"❌ Ошибка редактирования: {str(e)}"
+
+    async def execute_command(self, command: str) -> Tuple[bool, str, str]:
+        """Выполнить команду на сервере"""
+        try:
+            # Безопасность: ограничиваем опасные команды
+            dangerous_commands = ['rm -rf', 'format', 'dd', 'mkfs', 'chmod 777']
+            if any(cmd in command for cmd in dangerous_commands):
+                return False, "", "❌ Опасная команда запрещена"
+            
+            # Специальная команда для очистки временных файлов
+            if command.strip() == "cleanup":
+                success, message = self.cleanup_temp_files()
+                return success, message, "Команда очистки выполнена"
+            
+            # Выполняем команду
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                capture_output=True, 
+                text=True, 
+                timeout=30
+            )
+            
+            output = result.stdout if result.stdout else result.stderr
+            success = result.returncode == 0
+            
+            return success, output, f"Код возврата: {result.returncode}"
+            
+        except subprocess.TimeoutExpired:
+            return False, "", "❌ Команда превысила лимит времени (30 секунд)"
+        except Exception as e:
+            logger.error(f"Ошибка выполнения команды: {e}")
+            return False, "", f"❌ Ошибка выполнения: {str(e)}"
+
+    def restart_bot(self) -> Tuple[bool, str]:
+        """Перезапустить бота"""
+        try:
+            # Заменить await self.bot_instance.shutdown() на:
+            if self.bot_instance:
+                # Если есть метод shutdown, вызвать его
+                if hasattr(self.bot_instance, 'shutdown'):
+                    self.bot_instance.shutdown()
+            
+            subprocess.Popen([sys.executable, __file__])
+            sys.exit(0)
+            
+            return True, "✅ Бот перезапускается..."
+        except Exception as e:
+            logger.error(f"Ошибка перезапуска бота: {e}")
+            return False, f"❌ Ошибка перезапуска: {str(e)}"
 
 # =============================================================================
 # КЛАСС SIMPLETEXTVECTORIZER
@@ -541,6 +661,8 @@ class DatasetManager:
     
     def delete_dataset(self, filename: str) -> bool:
         """Удалить датасет"""
+        # Добавляем проверку прав доступа
+        
         try:
             filepath = os.path.join(self.datasets_dir, filename)
             if os.path.exists(filepath):
@@ -1687,7 +1809,10 @@ class SelfLearningAI:
                 raise ValueError(error_msg)
             
             # СОЗДАЕМ ДАТАСЕТ И DATALOADER
-            dataset = LearningDataset(list(zip(X, y_onehot)))
+            # ИСПРАВЛЕНИЕ 1: Преобразуем данные в правильный тип
+            X_tensor = torch.FloatTensor(X)
+            y_tensor = torch.FloatTensor(y_onehot)
+            dataset = LearningDataset(list(zip(X_tensor, y_tensor)))
             
             # Убеждаемся, что batch_size не больше размера датасета
             actual_batch_size = min(batch_size, len(X))
@@ -1696,7 +1821,9 @@ class SelfLearningAI:
                 logger.error(error_msg)
                 raise ValueError(error_msg)
                 
-            dataloader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=True)
+            # ИСПРАВЛЕНИЕ 2: Убираем drop_last=True для маленьких датасетов
+            drop_last = len(X) > actual_batch_size
+            dataloader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=drop_last)
             
             self.model.train()
             epoch_losses = []
@@ -1721,15 +1848,35 @@ class SelfLearningAI:
                     
                     # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА РАЗМЕРНОСТЕЙ
                     if batch_X.shape[1] != self.input_size:
-                        error_msg = f"❌ Несоответствие входного размера: batch_X={batch_X.shape[1]}, model_input={self.input_size}"
-                        logger.error(error_msg)
-                        continue
+                        # ИСПРАВЛЕНИЕ 3: Автоматическое приведение размеров вместо пропуска
+                        if batch_X.shape[1] > self.input_size:
+                            batch_X = batch_X[:, :self.input_size]
+                        else:
+                            # Дополняем нулями
+                            padding = torch.zeros(batch_X.shape[0], self.input_size - batch_X.shape[1], device=self.device)
+                            batch_X = torch.cat([batch_X, padding], dim=1)
+                        logger.warning(f"🔄 Исправлен размер батча: {batch_X.shape}")
                     
                     self.optimizer.zero_grad()
                     outputs = self.model(batch_X)
                     
+                    # ИСПРАВЛЕНИЕ 4: Проверка выходов модели
+                    if torch.isnan(outputs).any():
+                        logger.error("❌ Выходы модели содержат NaN значения")
+                        continue
+                    
                     loss = self.criterion(outputs, batch_y)
+                    
+                    # ИСПРАВЛЕНИЕ 5: Проверка значения потерь
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        logger.error("❌ Потери содержат NaN или Inf значения")
+                        continue
+                    
                     loss.backward()
+                    
+                    # ИСПРАВЛЕНИЕ 6: Градиентный clipping для стабильности
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    
                     self.optimizer.step()
                     
                     total_loss += loss.item()
@@ -1748,6 +1895,8 @@ class SelfLearningAI:
                         logger.info(f"📈 Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
                 else:
                     logger.warning(f"⚠️ Эпоха {epoch+1}: нет данных для обучения")
+                    # ИСПРАВЛЕНИЕ 7: Добавляем значение потерь даже при пустой эпохе
+                    epoch_losses.append(float('inf'))
             
             # СОХРАНЕНИЕ МЕТРИК
             self.performance_metrics['loss'].extend(epoch_losses)
@@ -1757,7 +1906,9 @@ class SelfLearningAI:
             # СОХРАНЕНИЕ МОДЕЛИ
             self.save_model()
             
-            logger.info(f"✅ Обучение завершено успешно! Финальный loss: {epoch_losses[-1] if epoch_losses else 'N/A'}")
+            # ИСПРАВЛЕНИЕ 8: Безопасное получение финального loss
+            final_loss = epoch_losses[-1] if epoch_losses and epoch_losses[-1] != float('inf') else 'N/A'
+            logger.info(f"✅ Обучение завершено успешно! Финальный loss: {final_loss}")
             
             return epoch_losses
             
@@ -2034,7 +2185,7 @@ def _update_output_size(self, new_output_size: int):
             logger.error(f"❌ Ошибка при скачивании и обучении с GitHub: {e}")
             return False
     
-    def _update_output_size(self, new_output_size: int):
+    '''def _update_output_size(self, new_output_size: int):
         """Обновление размера выходного слоя"""
         try:
             # Сохраняем старые веса
@@ -2064,7 +2215,7 @@ def _update_output_size(self, new_output_size: int):
             logger.info(f"Размер выходного слоя обновлен до {new_output_size}")
             
         except Exception as e:
-            logger.error(f"Ошибка обновления выходного слоя: {e}")
+            logger.error(f"Ошибка обновления выходного слоя: {e}")'''
     
     def dataset_predict(self, text: str):
         """Предсказание категории текста с помощью обученной модели"""
@@ -2365,6 +2516,29 @@ class EnhancedAIAssistant:
         # Инициализация менеджера датасетов
         self.dataset_manager = DatasetManager()
     
+    def _check_and_perform_learning(self):  # Убрать async
+        """Проверить и выполнить самообучение если нужно"""
+        try:
+            time_since_last_learning = datetime.now() - self.last_learning_time
+            hours_passed = time_since_last_learning.total_seconds() / 3600
+            
+            if hours_passed >= self.learning_interval_hours:
+                logger.info("Запуск периодического самообучения из диалогов...")
+                
+                # Заменить await на прямой вызов
+                success, message = self.self_learning_ai.learn_from_user_dialogues()
+                
+                if success:
+                    logger.info("Периодическое самообучение завершено успешно")
+                else:
+                    logger.warning(f"Периодическое самообучение не удалось: {message}")
+                
+                self.last_learning_time = datetime.now()
+                
+        except Exception as e:
+            logger.error(f"Ошибка при проверке самообучения: {e}")
+
+
     def get_conversation_history(self, user_id: int) -> List[Dict]:
         """Получить истории разговора для пользователя"""
         if user_id not in self.conversation_cache:
@@ -2533,44 +2707,36 @@ class EnhancedAIAssistant:
             "is_configured": True
         }
 
+    # ИСПРАВЬТЕ в методе train_on_dataset (строка ~1400)
     async def train_on_dataset(self, dataset_filename: str) -> Tuple[bool, str]:
-        """Запуск обучения на датасете с возвратом результата и сообщения"""
+        """Обучение на датасете с правильной асинхронностью"""
         try:
             logger.info(f"🔄 Запуск обучения на датасете: {dataset_filename}")
-            success = self.self_learning_ai.learn_from_dataset(dataset_filename)
+            
+            # Используем asyncio для запуска в отдельном потоке
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None, 
+                lambda: self.self_learning_ai.learn_from_dataset(dataset_filename, 5)
+            )
             
             if success:
-                message = (
-                    f"✅ Обучение на датасете '{dataset_filename}' завершено успешно!\n\n"
-                    "Теперь ИИ обладает новыми знаниями и может:\n"
-                    "• Лучше понимать вопросы\n"
-                    "• Давать более точные ответы\n"
-                    "• Классифицировать запросы\n\n"
-                    "Попробуйте задать вопрос в чате с ИИ!"
-                )
+                return True, "✅ Обучение завершено успешно!"
             else:
-                message = (
-                    f"❌ Обучение на датасете '{dataset_filename}' не удалось\n\n"
-                    "Возможные причины:\n"
-                    "• Неправильный формат данных\n"
-                    "• Ошибки в данных\n" 
-                    "• Недостаточно данных\n\n"
-                    "Попробуйте другой датасет или проверьте формат."
-                )
-            
-            return success, message
-            
+                return False, "❌ Ошибка при обучении на датасете"
+                
         except Exception as e:
             error_message = f"❌ Ошибка при обучении на датасете: {str(e)}"
             logger.error(error_message)
             return False, error_message
-
+                
+        
     async def train_from_github(self, github_url: str) -> Tuple[bool, str]:
         """Обучение на датасете с GitHub с возвратом результата и сообщения"""
         try:
             logger.info(f"🔄 Запуск обучения с GitHub: {github_url}")
-            success = await self.self_learning_ai.download_and_train_from_github(github_url)
-            
+            success = self.self_learning_ai.download_and_train_from_github(github_url)
+
             if success:
                 message = (
                     "✅ Датасет успешно скачан с GitHub и модель обучена!\n\n"
@@ -2783,13 +2949,64 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
     
-    def add_subject(self, name: str) -> int:
-        """Добавить предмет"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('INSERT INTO subjects (name) VALUES (?)', (name,))
-            conn.commit()
-            return cursor.lastrowid
+    async def add_subject(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать добавление предмета"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'adding_subject'
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "➕ Добавление нового предмета\n\n"
+            "Введите название предмета:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+async def handle_add_subject(self, update: Update, context: ContextTypes.DEFAULT_TYPE, subject_name: str):
+    """Обработка добавления предмета"""
+    if not subject_name.strip():
+        await self.send_message_with_cleanup(update, context, "❌ Название предмета не может быть пустым")
+        return
+    
+    try:
+        subject_id = self.db.add_subject(subject_name.strip())
+        
+        if subject_id:
+            await self.send_message_with_cleanup(
+                update, context,
+                f"✅ Предмет '{subject_name}' успешно добавлен!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить еще предмет", callback_data="add_subject")],
+                    [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        else:
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Не удалось добавить предмет '{subject_name}'",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data="add_subject")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+    
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении предмета: {e}")
+        await self.send_message_with_cleanup(
+            update, context,
+            f"❌ Ошибка при добавлении предмета: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+            ])
+        )
+    
+    context.user_data.clear()
     
     def get_lectures(self, subject_id: int) -> List[Dict]:
         """Получить все лекции по предмету"""
@@ -2882,16 +3099,113 @@ class Database:
             ''', (subject_id,))
             return [dict(row) for row in cursor.fetchall()]
     
-    def add_teacher(self, name: str, subject_id: int) -> int:
-        """Добавить преподавателя"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO teachers (name, subject_id) 
-                VALUES (?, ?)
-            ''', (name, subject_id))
-            conn.commit()
-            return cursor.lastrowid
+    async def start_add_teacher(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать добавление преподавателя"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        # Получаем список предметов для выбора
+        subjects = self.db.get_all_subjects()
+        
+        if not subjects:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "👨‍🏫 Добавление преподавателя\n\n"
+                "❌ Сначала добавьте предметы, чтобы привязать преподавателя.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'adding_teacher_subject'
+        
+        # Создаем клавиатуру с предметами
+        keyboard = []
+        for subject in subjects:
+            keyboard.append([InlineKeyboardButton(
+                f"📖 {subject['name']}", 
+                callback_data=f"select_subject_{subject['id']}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "👨‍🏫 Добавление преподавателя\n\n"
+            "Выберите предмет для преподавателя:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def handle_select_subject_for_teacher(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора предмета для преподавателя"""
+        context.user_data['teacher_subject_id'] = subject_id
+        context.user_data['state'] = 'adding_teacher_name'
+        
+        subject = self.db.get_subject(subject_id)
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            f"👨‍🏫 Добавление преподавателя\n\n"
+            f"📖 Предмет: {subject['name']}\n\n"
+            "Введите ФИО преподавателя:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад к выбору предмета", callback_data="add_teacher")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    async def handle_add_teacher(self, update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_name: str):
+        """Обработка добавления преподавателя"""
+        if not teacher_name.strip():
+            await self.send_message_with_cleanup(update, context, "❌ ФИО преподавателя не может быть пустым")
+            return
+        
+        subject_id = context.user_data.get('teacher_subject_id')
+        if not subject_id:
+            await self.send_message_with_cleanup(update, context, "❌ Ошибка: предмет не выбран")
+            context.user_data.clear()
+            return
+        
+        try:
+            teacher_id = self.db.add_teacher(teacher_name.strip(), subject_id)
+            subject = self.db.get_subject(subject_id)
+            
+            if teacher_id:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"✅ Преподаватель '{teacher_name}' успешно добавлен!\n"
+                    f"📖 Предмет: {subject['name']}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("👨‍🏫 Добавить еще преподавателя", callback_data="add_teacher")],
+                        [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+            else:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"❌ Не удалось добавить преподавателя '{teacher_name}'",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="add_teacher")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+        
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении преподавателя: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при добавлении преподавателя: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        
+        context.user_data.clear()
     
     def get_teacher(self, teacher_id: int) -> Optional[Dict]:
         """Получить преподавателя по ID"""
@@ -3053,6 +3367,43 @@ class EnhancedLectureBot:
         # Текст для помощника
         self.helper_text = "👋 Привет! Помогаю в разработке курсовых (от 2000), а также в подготовке отчетов учебных и производственных практик (от 500), проектных работ и докладов (от 200), практических заданий и конспектов (от 35). Создаю сайты (html, css, js, react, vue, django, php, nodeJS, tilda) и пишу программы (c#, pascal, python, delphia)"
         self.helper_contact = "@RaffLik"
+    async def view_all_datasets(self, query, context):
+        """Показать все датасеты"""
+        datasets = self.ai_assistant.get_datasets_info()
+        
+        if not datasets:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📚 Все датасеты\n\nНет доступных датасетов.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")]
+                ])
+            )
+            return
+        
+        message_text = "📚 Все датасеты:\n\n"
+        for i, dataset in enumerate(datasets, 1):
+            message_text += f"{i}. {dataset['filename']} ({dataset['size_mb']} MB)\n"
+        
+        keyboard = []
+        for dataset in datasets:
+            filename = dataset['filename']
+            display_name = filename[:15] + "..." if len(filename) > 15 else filename
+            
+            keyboard.append([
+                InlineKeyboardButton(f"🎯 {display_name}", callback_data=f"train_on_dataset_{filename}"),
+                InlineKeyboardButton(f"🗑️", callback_data=f"delete_dataset_{filename}")
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
 
     async def diagnose_training(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Диагностика обучения датасетов"""
@@ -3194,13 +3545,21 @@ class EnhancedLectureBot:
         self.fallback_handler
     ))
 
-async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик для любых непонятных сообщений"""
-    if update.message and update.message.text:
-        text = update.message.text.strip()
-        if text in ['/start', 'start', 'старт']:
-            await self.start(update, context)
-        else:
+    async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик для любых непонятных сообщений"""
+        try:
+            if update.message and update.message.text:
+                text = update.message.text.strip()
+                if text in ['/start', 'start', 'старт']:
+                    await self.start(update, context)
+                else:
+                    await self.show_main_menu(update, context)
+            else:
+                # Обработка других типов сообщений
+                await self.show_main_menu(update, context)
+        except Exception as e:
+            logger.error(f"Ошибка в fallback_handler: {e}")
+            # Просто показываем меню в случае ошибки
             await self.show_main_menu(update, context)
 
 
@@ -3247,7 +3606,28 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             await query.edit_message_text(text, **kwargs)
         except Exception as e:
             logger.error(f"Ошибка при редактировании сообщения: {e}")
-            await self.send_message_with_cleanup(Update(update_id=0, callback_query=query), context, text, **kwargs)
+            fake_update = Update(update_id=0, message=query.message)
+            await self.send_message_with_cleanup(fake_update, context, "❌ Лекция не найдена в базе данных")
+
+    async def start_add_subject(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать добавление предмета"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'adding_subject'
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "➕ Добавление нового предмета\n\n"
+            "Введите название предмета:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -3274,7 +3654,7 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
         await self.show_main_menu(update, context)
 
     async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать главное меню с новой кнопкой пожертвований"""
+        """Показать главное меню"""
         keyboard = [
             [InlineKeyboardButton("🤖 ИИ-помощник", callback_data="ai_assistant")],
             [InlineKeyboardButton("📚 Предметы", callback_data="subjects")],
@@ -3342,6 +3722,7 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
         keyboard = [
             [InlineKeyboardButton("📊 Статус системы", callback_data="system_status")],
             [InlineKeyboardButton("🔄 Обновить код из GitHub", callback_data="update_code")],
+            [InlineKeyboardButton("🧹 Очистить временные файлы", callback_data="cleanup_temp")],  # Новая кнопка
             [InlineKeyboardButton("🔄 Перезапустить бота", callback_data="restart_bot")],
             [InlineKeyboardButton("📁 Просмотр файлов", callback_data="view_files")],
             [InlineKeyboardButton("⚙️ Выполнить команду", callback_data="execute_command")],
@@ -3532,7 +3913,6 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
         """Обработчик нажатий на кнопки с новыми функциями"""
         query = update.callback_query
         await query.answer()
-        
         data = query.data
         
         try:
@@ -3544,7 +3924,7 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             elif data == "system_status":
                 await self.show_system_status(query, context)
             elif data == "update_code":
-                await self.update_code_from_github(query, context)
+                await self.update_code_from_github_callback(query, context)
             elif data == "restart_bot":
                 await self.restart_bot_confirmation(query, context)
             elif data == "view_files":
@@ -3557,12 +3937,27 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
                 await self.list_system_backups(query, context)
             elif data == "force_learning":
                 await self.force_learning_callback(query, context)
+            elif data == "confirm_restart":
+                await self.confirm_restart(query, context)
+            elif data == "update_code":
+                await self.update_code_from_github_callback(query, context)
+
             elif data.startswith("view_logs_"):
                 # Обработка кликабельных кнопок просмотра логов
                 log_type = data.split("_")[2]
                 await self.show_logs_by_type(query, context, log_type)
+            elif data == "cleanup_temp":
+                await self.cleanup_temp_files_callback(query, context)
+            elif data == "update_code":
+                await self.update_code_from_github_callback(query, context)
+            elif data == "create_backup":
+                await self.create_system_backup(query, context)
+            elif data == "system_status":
+                await self.show_system_status(query, context)
             elif data == "diagnose_training":
-                await self.diagnose_training(Update(update_id=0, callback_query=query), context)
+                await self.diagnose_training(update, context)
+            elif data == "cleanup_temp":
+                await self.cleanup_temp_files_callback(query, context)
             elif data == "ai_assistant":
                 await self.show_ai_chat(query, context)
             elif data == "subjects":
@@ -3644,15 +4039,42 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             elif data.startswith("delete_useful_"):
                 content_id = int(data.split("_")[2])
                 await self.delete_useful_content(query, content_id, context)
+            elif data == "view_all_datasets":
+                await self.view_all_datasets(query, context)
             else:
-                await query.answer("❌ Функция в разработке", show_alert=True)
-            
+                # НЕИЗВЕСТНЫЕ КОМАНДЫ - просто показываем alert и НЕ переходим в меню
+                logger.warning(f"Неизвестный callback_data: {data}")
+                await query.answer("❌ Команда не распознана", show_alert=True)
+                return  # Выходим без перехода в меню
+                
         except (ValueError, IndexError) as e:
             logger.error(f"Ошибка обработки callback_data '{data}': {e}")
             await query.answer("❌ Ошибка обработки команды", show_alert=True)
         except Exception as e:
             logger.error(f"Неожиданная ошибка в button_handler: {e}")
             await query.answer("❌ Произошла ошибка", show_alert=True)
+            
+                
+    async def cleanup_temp_files_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Очистка временных файлов через callback"""
+        await self.edit_message_with_cleanup(
+            query, context,
+            "🧹 Очистка временных файлов...\n\n"
+            "Удаляем временные директории и файлы..."
+        )
+        
+        # Исправленный вызов - теперь это асинхронный метод
+        success, message = await self.code_manager.cleanup_temp_files()
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
+                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+            ])
+        )
+
 
     async def show_donate_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Callback для кнопки пожертвований"""
@@ -3701,14 +4123,15 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             ])
         )
 
-    async def update_code_from_github(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Обновить код из GitHub"""
+    async def update_code_from_github_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Обновить код из GitHub через callback"""
         await self.edit_message_with_cleanup(
             query, context,
             "🔄 Обновление кода из GitHub...\n\n"
             "Это может занять несколько минут. Пожалуйста, подождите."
         )
         
+        # Исправленный вызов - теперь это асинхронный метод
         success, message = await self.code_manager.update_code_from_github()
         
         await self.edit_message_with_cleanup(
@@ -3720,6 +4143,7 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
                 [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
             ])
         )
+
 
     async def restart_bot_confirmation(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Подтверждение перезапуска бота"""
@@ -3822,6 +4246,7 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             "Пожалуйста, подождите."
         )
         
+        # Исправленный вызов - теперь это асинхронный метод
         success, message = await self.code_manager.create_backup()
         
         await self.edit_message_with_cleanup(
@@ -3872,6 +4297,10 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
 
     async def show_logs_by_type(self, query, context: ContextTypes.DEFAULT_TYPE, log_type: str):
         """Показать логи по типу с кликабельными кнопками"""
+    # Добавляем проверку прав доступа
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
         logs = self.db.get_logs(limit=50, level=log_type.upper() if log_type != 'all' else None)
         
         if not logs:
@@ -3986,8 +4415,9 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
 
     async def handle_command_execution(self, update: Update, context: ContextTypes.DEFAULT_TYPE, command: str):
         """Обработка выполнения команд"""
+        # Исправленный вызов
         success, output, message = await self.code_manager.execute_command(command)
-        
+            
         response_text = f"⚙️ {message}\n\n"
         
         if success:
@@ -4657,7 +5087,34 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             "📚 Выберите предмет:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+    
+    async def show_ai_chat(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать чат с ИИ"""
+        await self.ai_chat(Update(update_id=0, callback_query=query), context)
 
+    '''async def show_subjects(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать предметы"""
+        await self.show_subjects(Update(update_id=0, callback_query=query), context)'''
+
+    async def show_schedule(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать расписание"""
+        await self.show_schedule(Update(update_id=0, callback_query=query), context)
+
+    async def show_helper(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать помощника"""
+        await self.show_helper(Update(update_id=0, callback_query=query), context)
+
+    async def show_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать полезную информацию"""
+        await self.show_useful_info(Update(update_id=0, callback_query=query), context)
+
+    async def show_support(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать поддержку"""
+        await self.show_support(Update(update_id=0, callback_query=query), context)
+
+    async def show_admin_panel(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать админ-панель"""
+        await self.admin_panel(Update(update_id=0, callback_query=query), context)
     async def show_subject_content(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
         """Показать контент предмета (лекции и практические)"""
         logger.info(f"Показать контент предмета: {subject_id}")
@@ -4967,6 +5424,195 @@ async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_T
             f"📊 Загружено файлов: {len(schedules)}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
+
+    async def start_single_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать одиночную загрузку файла"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        subjects = self.db.get_all_subjects()
+        
+        if not subjects:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📤 Одиночная загрузка файла\n\n"
+                "❌ Сначала добавьте предметы.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'single_upload_subject'
+        
+        # Создаем клавиатуру с предметами
+        keyboard = []
+        for subject in subjects:
+            keyboard.append([InlineKeyboardButton(
+                f"📖 {subject['name']}", 
+                callback_data=f"upload_subject_{subject['id']}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "📤 Одиночная загрузка файла\n\n"
+            "Выберите предмет для загрузки:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def handle_select_upload_subject(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора предмета для загрузки"""
+        context.user_data['upload_subject_id'] = subject_id
+        context.user_data['state'] = 'single_upload_type'
+        
+        subject = self.db.get_subject(subject_id)
+        
+        keyboard = [
+            [InlineKeyboardButton("📓 Лекция", callback_data="upload_type_lecture")],
+            [InlineKeyboardButton("📝 Практическая работа", callback_data="upload_type_practice")],
+            [InlineKeyboardButton("🔙 Назад к выбору предмета", callback_data="upload_file")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+        ]
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            f"📤 Одиночная загрузка файла\n\n"
+            f"📖 Предмет: {subject['name']}\n\n"
+            "Выберите тип файла:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+    async def handle_select_upload_type(self, query, upload_type: str, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора типа файла для загрузки"""
+        context.user_data['upload_type'] = upload_type
+        context.user_data['state'] = 'single_upload_number'
+        
+        subject_id = context.user_data.get('upload_subject_id')
+        subject = self.db.get_subject(subject_id)
+        
+        type_text = "лекцию" if upload_type == "lecture" else "практическую работу"
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            f"📤 Одиночная загрузка файла\n\n"
+            f"📖 Предмет: {subject['name']}\n"
+            f"📄 Тип: {type_text}\n\n"
+            "Введите номер (например, 1 для Лекции 1):",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад к выбору типа", callback_data=f"upload_subject_{subject_id}")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    async def handle_upload_number(self, update: Update, context: ContextTypes.DEFAULT_TYPE, number_text: str):
+        """Обработка ввода номера для загрузки"""
+        try:
+            number = int(number_text.strip())
+            if number <= 0:
+                raise ValueError("Номер должен быть положительным числом")
+        except ValueError:
+            await self.send_message_with_cleanup(update, context, "❌ Введите корректный номер (положительное число)")
+            return
+        
+        context.user_data['upload_number'] = number
+        context.user_data['state'] = 'single_upload_file'
+        
+        subject_id = context.user_data.get('upload_subject_id')
+        upload_type = context.user_data.get('upload_type')
+        subject = self.db.get_subject(subject_id)
+        
+        type_text = "лекцию" if upload_type == "lecture" else "практическую работу"
+        
+        await self.send_message_with_cleanup(
+            update, context,
+            f"📤 Одиночная загрузка файла\n\n"
+            f"📖 Предмет: {subject['name']}\n"
+            f"📄 Тип: {type_text}\n"
+            f"🔢 Номер: {number}\n\n"
+            "Теперь отправьте файл:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    async def save_single_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Сохранение одиночного файла"""
+        if not update.message.document:
+            await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, отправьте файл.")
+            return
+        
+        subject_id = context.user_data.get('upload_subject_id')
+        upload_type = context.user_data.get('upload_type')
+        number = context.user_data.get('upload_number')
+        
+        if not all([subject_id, upload_type, number]):
+            await self.send_message_with_cleanup(update, context, "❌ Ошибка: не все параметры загрузки установлены")
+            context.user_data.clear()
+            return
+        
+        file = await update.message.document.get_file()
+        filename = update.message.document.file_name
+        
+        try:
+            # Создаем директории если не существуют
+            base_dir = "lectures" if upload_type == "lecture" else "practices"
+            os.makedirs(base_dir, exist_ok=True)
+            
+            file_path = os.path.join(base_dir, filename)
+            await file.download_to_drive(file_path)
+            
+            subject = self.db.get_subject(subject_id)
+            
+            # Сохраняем в базу данных
+            if upload_type == "lecture":
+                lecture_id = self.db.add_lecture(subject_id, number, file_path)
+                success = lecture_id is not None
+                type_name = "лекция"
+            else:
+                practice_id = self.db.add_practice(subject_id, number, file_path)
+                success = practice_id is not None
+                type_name = "практическая работа"
+            
+            if success:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"✅ {type_name.capitalize()} №{number} успешно загружена!\n\n"
+                    f"📖 Предмет: {subject['name']}\n"
+                    f"📄 Файл: {filename}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📤 Загрузить еще файл", callback_data="upload_file")],
+                        [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+            else:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"❌ Не удалось загрузить {type_name}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="upload_file")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+        
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке файла: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при загрузке файла: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        
+        context.user_data.clear()
+
 
     async def start_upload_schedule(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Начать загрузку расписания"""
@@ -5534,7 +6180,7 @@ def main():
     """Функция для запуска улучшенного бота"""
     attempt = 0
     max_attempts = 5
-    
+        
     while attempt < max_attempts:
         try:
             logger.info(f"Попытка запуска улучшенного бота №{attempt + 1}")
