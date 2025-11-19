@@ -3044,6 +3044,21 @@ class EnhancedLectureBot:
         # Обработчики callback queries
         self.application.add_handler(CallbackQueryHandler(self.button_handler))
 
+        self.application.add_handler(MessageHandler(
+        filters.ALL, 
+        self.fallback_handler
+    ))
+
+async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для любых непонятных сообщений"""
+    if update.message and update.message.text:
+        text = update.message.text.strip()
+        if text in ['/start', 'start', 'старт']:
+            await self.start(update, context)
+        else:
+            await self.show_main_menu(update, context)
+
+
     async def cleanup_previous_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Удаление предыдущих сообщений бота"""
         try:
@@ -3094,7 +3109,23 @@ class EnhancedLectureBot:
         user_id = update.effective_user.id
         username = update.effective_user.username or "Пользователь"
         
+        # ПОЛНАЯ ОЧИСТКА СОСТОЯНИЯ ПОЛЬЗОВАТЕЛЯ
+        context.user_data.clear()
+        
+        # Добавляем пользователя в базу
         self.db.add_user(user_id, username)
+        
+        # Логируем запуск бота
+        logger.info(f"Пользователь {user_id} ({username}) запустил бота")
+        
+        # Отправляем приветственное сообщение и главное меню
+        welcome_text = (
+            "👋 Добро пожаловать!\n\n"
+            "У меня есть множество полезных функций!\n\n"
+            "Выберите действие в меню ниже:"
+        )
+    
+        await self.send_message_with_cleanup(update, context, welcome_text)
         await self.show_main_menu(update, context)
 
     async def show_main_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
