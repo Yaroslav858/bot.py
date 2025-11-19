@@ -140,7 +140,7 @@ class BotCodeManager:
         try:
             if not repo_url:
                 # Попробуем определить URL репозитория из конфигурации
-                repo_url = "https://github.com/your-repo/bot.git"  # Заменить на реальный URL
+                repo_url = "https://github.com/Yaroslav858/bot.py/blob/main/bot.py"  # Заменить на реальный URL
             
             temp_dir = "temp_update"
             
@@ -3571,6 +3571,15 @@ class EnhancedLectureBot:
                 [InlineKeyboardButton("❌ Отмена", callback_data="code_manager")]
             ])
         )
+async def confirm_restart(self, query, context):
+    """Подтверждение перезапуска"""
+    success, message = await self.code_manager.restart_bot()
+    await self.edit_message_with_cleanup(query, context, message)
+
+async def view_all_datasets(self, query, context):
+    """Показать все датасеты"""
+    datasets = self.ai_assistant.get_datasets_info()
+
 
     async def start_command_execution(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Начать выполнение команды"""
