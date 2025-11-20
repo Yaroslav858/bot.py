@@ -2677,6 +2677,7 @@ class Database:
     def __init__(self, db_name: str = "bot_database.db"):
         self.db_name = db_name
         self.init_database()
+        self.setup_logs_table()
 
 
     def get_connection(self) -> sqlite3.Connection:
@@ -3198,48 +3199,93 @@ class Database:
         finally:
             conn.close()
 
-    def add_log_entry(self, level: str, message: str, user_id: Optional[int] = None) -> bool:
-        """Добавление записи в лог"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
+    def add_log(self, log_type: str, user_id: int, details: str, metadata: dict = None):
+        """Добавить запись в лог"""
         try:
-            cursor.execute(
-                "INSERT INTO logs (level, message, user_id) VALUES (?, ?, ?)",
-                (level, message, user_id)
-            )
-            conn.commit()
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка при добавлении лога: {e}")
-            return False
-        finally:
-            conn.close()
-
-    def get_logs(self, limit: int = 100, log_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Получение логов с фильтрацией по типу"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        
-        try:
-            if log_type:
-                cursor.execute(
-                    "SELECT * FROM logs WHERE level = ? ORDER BY created_at DESC LIMIT ?",
-                    (log_type.upper(), limit)
-                )
-            else:
-                cursor.execute(
-                    "SELECT * FROM logs ORDER BY created_at DESC LIMIT ?",
-                    (limit,)
-                )
+            conn = self.get_connection()
+            cursor = conn.cursor()
             
-            logs = [dict(row) for row in cursor.fetchall()]
-            return logs
-        except Exception as e:
-            logger.error(f"Ошибка при получении логов: {e}")
-            return []
-        finally:
+            timestamp = datetime.now().isoformat()
+            
+            cursor.execute('''
+                INSERT INTO logs (timestamp, type, user_id, details, metadata)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (timestamp, log_type, user_id, details, 
+                json.dumps(metadata) if metadata else None))
+            
+            conn.commit()
             conn.close()
+            
+            logging.info(f"Лог добавлен: {log_type} для пользователя {user_id}")
+            
+        except Exception as e:
+            logging.error(f"Ошибка при добавлении лога: {e}")
+
+    def get_logs(self, user_id: int = None, log_type: str = None, limit: int = 100):
+        """Получить логи с фильтрацией"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            query = "SELECT * FROM logs WHERE 1=1"
+            params = []
+            
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
+                
+            if log_type:
+                query += " AND type = ?"
+                params.append(log_type)
+                
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            
+            cursor.execute(query, params)
+            logs = cursor.fetchall()
+            
+            conn.close()
+            return logs
+            
+        except Exception as e:
+            logging.error(f"Ошибка при получении логов: {e}")
+            return []
+
+    def setup_logs_table(self):
+        """Создать таблицу логов если не существует"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    details TEXT,
+                    metadata TEXT
+                )
+            ''')
+            
+            # Создаем индекс для быстрого поиска
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_logs_user_type 
+                ON logs(user_id, type)
+            ''')
+            
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_logs_timestamp 
+                ON logs(timestamp)
+            ''')
+            
+            conn.commit()
+            conn.close()
+            
+            logging.info("Таблица логов инициализирована")
+            
+        except Exception as e:
+            logging.error(f"Ошибка при создании таблицы логов: {e}")
 
     def get_subject_lectures_count(self, subject_id: int) -> int:
         """Получение количества лекций по предмету"""
@@ -4117,6 +4163,624 @@ class EnhancedLectureBot:
         except Exception as e:
             logger.error(f"Неожиданная ошибка в button_handler: {e}")
             await query.answer("❌ Произошла ошибка", show_alert=True)
+
+    async def show_delete_files_menu(self, query, context: ContextTypes.DEFAULT_TYPE):
+    
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "🗑️ Удаление файлов\n\n"
+            "Выберите тип файлов для удаления:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📓 Лекции", callback_data="delete_lectures_menu")],
+                [InlineKeyboardButton("📝 Практические", callback_data="delete_practices_menu")],
+                [InlineKeyboardButton("📅 Расписания", callback_data="delete_schedules_menu")],
+                [InlineKeyboardButton("📦 Полезная информация", callback_data="delete_useful_menu")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+            ])
+        )
+    
+    async def show_logs(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать логи системы с кликабельными кнопками"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        logs = self.db.get_logs(limit=50)
+        
+        if not logs:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📋 Логи системы\n\nПока нет записей в логах.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
+                    [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
+                    [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
+                    [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        # Группируем логи по уровням
+        error_logs = [log for log in logs if log['level'] == 'ERROR']
+        warning_logs = [log for log in logs if log['level'] == 'WARNING']
+        info_logs = [log for log in logs if log['level'] == 'INFO']
+        
+        logs_text = (
+            "📋 Логи системы\n\n"
+            f"❌ Ошибки: {len(error_logs)}\n"
+            f"⚠️ Предупреждения: {len(warning_logs)}\n"
+            f"ℹ️ Инфо: {len(info_logs)}\n\n"
+            "Нажмите на кнопку ниже для просмотра конкретного типа логов:"
+        )
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            logs_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
+                [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
+                [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
+                [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+            ])
+        )
+
+
+    async def manage_schedule(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Управление расписанием (админ)"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        schedules = self.db.get_all_schedule()
+        
+        keyboard = [
+            [InlineKeyboardButton("📤 Загрузить расписание", callback_data="upload_schedule")],
+            [InlineKeyboardButton("📋 Просмотреть расписание", callback_data="view_schedule")]
+        ]
+        
+        if schedules:
+            for schedule in schedules:
+                keyboard.append([
+                    InlineKeyboardButton(f"🗑️ Удалить: {schedule['title']}", callback_data=f"delete_schedule_{schedule['id']}")
+                ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "📅 Управление расписанием\n\n"
+            f"📊 Загружено файлов: {len(schedules)}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+
+    async def update_code_from_github_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Обновить код из GitHub через callback"""
+        await self.edit_message_with_cleanup(
+            query, context,
+            "🔄 Обновление кода из GitHub...\n\n"
+            "Это может занять несколько минут. Пожалуйста, подождите."
+        )
+        
+        # Исправленный вызов - теперь это асинхронный метод
+        success, message = await self.code_manager.update_code_from_github()
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Перезапустить", callback_data="restart_bot")] if success else [],
+                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
+                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+            ])
+        )
+
+    async def show_manage_datasets(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать интерфейс управления датасетами"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        datasets = self.ai_assistant.get_datasets_info()
+        
+        if not datasets:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📚 Управление датасетами\n\n"
+                "Пока нет загруженных датасетов.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        # Сортируем датасеты по размеру (от большего к меньшему)
+        datasets.sort(key=lambda x: x['size_bytes'], reverse=True)
+        
+        total_size = sum(d['size_bytes'] for d in datasets)
+        total_files = len(datasets)
+        
+        message_text = (
+            "📚 Управление датасетами\n\n"
+            f"📊 Всего датасетов: {total_files}\n"
+            f"💾 Общий размер: {total_size / (1024*1024):.1f} MB\n\n"
+            "Доступные датасеты:\n"
+        )
+        
+        # Добавляем информацию о каждом датасете
+        for i, dataset in enumerate(datasets[:10]):  # Показываем первые 10
+            message_text += f"\n{i+1}. {dataset['filename']} ({dataset['size_mb']} MB)"
+        
+        if total_files > 10:
+            message_text += f"\n\n... и еще {total_files - 10} датасетов"
+        
+        keyboard = []
+        
+        # Добавляем кнопки для каждого датасета (обучение и удаление)
+        for dataset in datasets[:5]:  # Показываем кнопки для первых 5 датасетов
+            filename = dataset['filename']
+            display_name = filename[:20] + "..." if len(filename) > 20 else filename
+            
+            keyboard.append([
+                InlineKeyboardButton(f"🎯 Обучить: {display_name}", callback_data=f"train_on_dataset_{filename}"),
+                InlineKeyboardButton(f"🗑️ Удалить", callback_data=f"delete_dataset_{filename}")
+            ])
+        
+        # Если датасетов больше 5, добавляем кнопку "Показать все"
+        if total_files > 5:
+            keyboard.append([InlineKeyboardButton("📋 Показать все датасеты", callback_data="view_all_datasets")])
+        
+        keyboard.extend([
+            [InlineKeyboardButton("📤 Загрузить новый датасет", callback_data="upload_dataset")],
+            [InlineKeyboardButton("🐙 Загрузить с GitHub", callback_data="upload_github_dataset")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+        ])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def delete_dataset(self, query, context: ContextTypes.DEFAULT_TYPE, dataset_name: str):
+        """Удалить датасет"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        # Подтверждение удаления
+        if not context.user_data.get(f'confirm_delete_{dataset_name}'):
+            context.user_data[f'confirm_delete_{dataset_name}'] = True
+            
+            dataset_info = self.ai_assistant.dataset_manager.get_dataset_info(dataset_name)
+            if dataset_info:
+                size_info = f" ({dataset_info['size_mb']} MB, создан {dataset_info['days_old']} дней назад)"
+            else:
+                size_info = ""
+            
+            await self.edit_message_with_cleanup(
+                query, context,
+                f"⚠️ Подтверждение удаления\n\n"
+                f"Вы уверены, что хотите удалить датасет:\n"
+                f"`{dataset_name}`{size_info}\n\n"
+                f"❌ Это действие нельзя отменить!",
+                parse_mode='Markdown',
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Да, удалить", callback_data=f"delete_dataset_{dataset_name}")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="manage_datasets")]
+                ])
+            )
+            return
+        
+        # Выполнение удаления после подтверждения
+        try:
+            success, message = self.ai_assistant.delete_dataset(dataset_name)
+            
+            # Очищаем флаг подтверждения
+            if f'confirm_delete_{dataset_name}' in context.user_data:
+                del context.user_data[f'confirm_delete_{dataset_name}']
+            
+            if success:
+                # Логируем удаление
+                self.db.add_log("INFO", f"Датасет удален: {dataset_name}", query.from_user.id)
+                
+                await self.edit_message_with_cleanup(
+                    query, context,
+                    message,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+            else:
+                await self.edit_message_with_cleanup(
+                    query, context,
+                    message,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"delete_dataset_{dataset_name}")],
+                        [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+                
+        except Exception as e:
+            logger.error(f"Ошибка при удалении датасета: {e}")
+            await self.edit_message_with_cleanup(
+                query, context,
+                f"❌ Произошла ошибка при удалении датасета: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+
+    async def start_dataset_training(self, query, context: ContextTypes.DEFAULT_TYPE, dataset_name: str):
+        """Запуск обучения на датасете с улучшенным интерфейсом"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        # Получаем информацию о датасете
+        dataset_info = self.ai_assistant.dataset_manager.get_dataset_info(dataset_name)
+        size_info = f" ({dataset_info['size_mb']} MB)" if dataset_info else ""
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            f"🔄 Запуск обучения на датасете: {dataset_name}{size_info}\n\n"
+            "📊 Процесс обучения:\n"
+            "• Загрузка и проверка данных\n"
+            "• Векторизация текстов\n" 
+            "• Обучение нейросети\n"
+            "• Сохранение модели\n\n"
+            "⏳ Это может занять несколько минут...\n"
+            "Бот продолжит работать во время обучения.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="manage_datasets")]
+            ])
+        )
+        
+        # Используем asyncio для асинхронного выполнения
+        try:
+            success, message = await self.ai_assistant.train_on_dataset(dataset_name)
+            
+            # Логируем результат обучения
+            log_level = "INFO" if success else "ERROR"
+            self.db.add_log(log_level, f"Обучение на датасете {dataset_name}: {'успех' if success else 'ошибка'}", query.from_user.id)
+            
+            # Создаем клавиатуру в зависимости от результата
+            if success:
+                keyboard = [
+                    [InlineKeyboardButton("🤖 Чат с ИИ", callback_data="ai_assistant")],
+                    [InlineKeyboardButton("📊 Статистика", callback_data="ai_stats")],
+                    [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ]
+            else:
+                keyboard = [
+                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"train_on_dataset_{dataset_name}")],
+                    [InlineKeyboardButton("📚 Выбрать другой датасет", callback_data="manage_datasets")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ]
+            
+            await self.edit_message_with_cleanup(
+                query, context,
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при обучении на датасете: {e}")
+            await self.edit_message_with_cleanup(
+                query, context,
+                f"❌ Неожиданная ошибка при обучении: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"train_on_dataset_{dataset_name}")],
+                    [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+
+
+    async def show_dataset_training(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать интерфейс обучения на датасетах с улучшенной навигацией"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        available_datasets = self.ai_assistant.get_datasets_info()
+        supported_formats = self.ai_assistant.self_learning_ai.dataset_trainer.get_supported_formats()
+        
+        # Форматируем информацию о поддерживаемых форматах
+        formats_text = "\n".join([f"• {fmt}" for fmt in supported_formats.values()])
+        
+        total_size = sum(d['size_bytes'] for d in available_datasets)
+        
+        keyboard = [
+            [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
+            [InlineKeyboardButton("🐙 Загрузить с GitHub", callback_data="upload_github_dataset")],
+            [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="ai_stats")]
+        ]
+        
+        if available_datasets:
+            # Показываем кнопки для обучения на доступных датасетах
+            for dataset_info in available_datasets[:3]:  # Показываем первые 3
+                btn_text = f"🎯 Обучить: {dataset_info['filename']} ({dataset_info['size_mb']} MB)"
+                keyboard.insert(0, [
+                    InlineKeyboardButton(
+                        btn_text, 
+                        callback_data=f"train_on_dataset_{dataset_info['filename']}"
+                    )
+                ])
+        
+        message_text = (
+            "📚 Обучение на датасетах\n\n"
+            f"📂 Доступно датасетов: {len(available_datasets)}\n"
+            f"💾 Общий размер: {total_size / (1024*1024):.1f} MB\n\n"
+            "📋 Поддерживаемые форматы:\n"
+            f"{formats_text}\n\n"
+            "🐙 Поддерживаются GitHub репозитории"
+        )
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    
+
+    async def clear_ai_history(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Очистка истории AI-чата"""
+        if 'ai_conversation' in context.user_data:
+            context.user_data['ai_conversation'] = []
+        
+        self.ai_assistant.clear_conversation_history(query.from_user.id)
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "🧹 История разговора очищена!\n\n"
+            "Теперь вы можете начать новый диалог.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤖 Задать вопрос", callback_data="ai_assistant")],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
+            ])
+        )
+
+    async def start_upload_dataset(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать загрузку датасета с информацией о ограничениях"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'uploading_dataset'
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "📤 Загрузка датасета\n\n"
+            "📁 Поддерживаемые форматы:\n"
+            "• JSON, JSONL (.json, .jsonl)\n"
+            "• CSV, TSV (.csv, .tsv, .txt)\n"
+            "• Excel (.xlsx, .xls)\n"
+            "• Текстовые файлы (.txt, .md)\n"
+            "• YAML (.yaml, .yml)\n"
+            "• XML (.xml)\n"
+            "• Parquet (.parquet)\n"
+            "• Feather (.feather)\n"
+            "• Pickle (.pkl, .pickle)\n\n"
+            "⚠️ Ограничения Telegram:\n"
+            "• Максимальный размер файла: 50MB\n"
+            "• Для больших файлов используйте GitHub\n\n"
+            "💡 Для файлов больше 50MB:\n"
+            "• Используйте опцию 'Загрузить с GitHub'\n"
+            "• Разделите файл на части\n"
+            "• Используйте сжатие (.zip)\n\n"
+            "Отправьте файл датасета:\n\n"
+            "❌ Для отмены используйте /cancel",
+            parse_mode='HTML'
+        )
+
+    async def start_upload_github_dataset(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать загрузку датасета с GitHub с информацией о новых форматах"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'uploading_github_dataset'
+        
+        supported_formats = self.ai_assistant.self_learning_ai.dataset_trainer.get_supported_formats()
+        
+        formats_text = "📋 Поддерживаемые форматы:\n"
+        for format_type, extensions in supported_formats.items():
+            formats_text += f"• {format_type.upper()}: {', '.join(extensions)}\n"
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "🐙 Загрузка датасета с GitHub\n\n"
+            f"{formats_text}\n\n"
+            "🔗 Примеры работающих ссылок:\n"
+            "• <code>https://github.com/huggingface/datasets</code>\n"
+            "• <code>https://github.com/username/repo/blob/main/data.json</code>\n"
+            "• <code>https://raw.githubusercontent.com/username/repo/main/data.csv</code>\n"
+            "• <code>https://github.com/username/repo/blob/main/dataset.xlsx</code>\n\n"
+            "💡 Советы:\n"
+            "• Убедитесь, что репозиторий публичный\n"
+            "• Поддерживаются JSON, CSV, Excel, текстовые файлы и многие другие\n"
+            "• Для больших репозиторий укажите прямой путь к файлу\n\n"
+            "Отправьте ссылку на GitHub:",
+            parse_mode='HTML'
+        )
+
+    
+
+    async def save_dataset_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Сохранение загруженного датасета с проверкой размера"""
+        if not update.message.document:
+            await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, отправьте файл датасета.")
+            return
+        
+        file = await update.message.document.get_file()
+        filename = update.message.document.file_name
+        file_size = update.message.document.file_size
+        
+        # Максимальный размер для Telegram - 50MB
+        MAX_TELEGRAM_SIZE = 50 * 1024 * 1024  # 50MB в байтах
+        
+        if file_size and file_size > MAX_TELEGRAM_SIZE:
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Файл слишком большой для загрузки через Telegram.\n\n"
+                f"📊 Размер вашего файла: {file_size / (1024*1024):.1f}MB\n"
+                f"📏 Максимальный размер: 50MB\n\n"
+                "💡 Рекомендации:\n"
+                "• Разделите большой датасет на несколько файлов\n"
+                "• Используйте сжатые форматы (.zip, .gz)\n"
+                "• Загрузите файл через GitHub и используйте ссылку"
+            )
+            return
+        
+        # Проверяем расширение файла
+        supported_extensions = ['.json', '.csv', '.jsonl', '.xlsx', '.xls', '.txt', '.yaml', '.yml', '.xml', '.parquet', '.feather', '.pkl', '.pickle']
+        if not any(filename.endswith(ext) for ext in supported_extensions):
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Неподдерживаемый формат файла. Используйте: {', '.join(supported_extensions)}"
+            )
+            return
+        
+        try:
+            # Создаем директорию для датасетов если не существует
+            datasets_dir = "training_datasets"
+            os.makedirs(datasets_dir, exist_ok=True)
+            
+            file_path = os.path.join(datasets_dir, filename)
+            
+            # Показываем прогресс загрузки для файлов больше 10MB
+            if file_size and file_size > 10 * 1024 * 1024:
+                progress_msg = await update.message.reply_text(
+                    f"📥 Загрузка файла {filename}...\n"
+                    f"Размер: {file_size / (1024*1024):.1f}MB\n"
+                    "⏳ Пожалуйста, подождите..."
+                )
+            
+            # Загружаем файл
+            await file.download_to_drive(file_path)
+            
+            # Удаляем сообщение о прогрессе если было создано
+            if file_size and file_size > 10 * 1024 * 1024:
+                try:
+                    await progress_msg.delete()
+                except:
+                    pass
+            
+            # Проверяем что файл успешно загружен
+            if not os.path.exists(file_path):
+                await self.send_message_with_cleanup(
+                    update, context,
+                    "❌ Ошибка при загрузке файла. Попробуйте еще раз."
+                )
+                return
+            
+            actual_size = os.path.getsize(file_path)
+            logger.info(f"Файл {filename} успешно загружен, размер: {actual_size} байт")
+            
+            context.user_data.clear()
+            
+            await self.send_message_with_cleanup(
+                update, context,
+                f"✅ Датасет '{filename}' успешно загружен!\n\n"
+                f"📊 Размер файла: {actual_size / (1024*1024):.1f}MB\n\n"
+                "Теперь вы можете обучить ИИ на этом датасете.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📚 Обучить на этом датасете", callback_data=f"train_on_dataset_{filename}")],
+                    [InlineKeyboardButton("📚 Выбрать другой датасет", callback_data="train_dataset")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении датасета: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при сохранении датасета: {str(e)}"
+            )
+                
+            context.user_data.clear()
+                
+    async def handle_github_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE, github_url: str):
+        """Обработка GitHub URL"""
+        try:
+            if not github_url.startswith('https://github.com') and not github_url.startswith('https://raw.githubusercontent.com'):
+                await self.send_message_with_cleanup(
+                    update, context,
+                    "❌ Неверный GitHub URL. Используйте ссылки вида:\n"
+                    "• https://github.com/user/repo\n"
+                    "• https://github.com/user/repo/blob/main/file.json\n"
+                    "• https://raw.githubusercontent.com/user/repo/main/file.csv"
+                )
+                return
+            
+            await update.message.chat.send_action(action="typing")
+            
+            # Скачиваем и обучаем
+            success, message = await self.ai_assistant.train_from_github(github_url)
+            
+            await self.send_message_with_cleanup(
+                update, context,
+                message,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🤖 Чат с ИИ", callback_data="ai_assistant")],
+                    [InlineKeyboardButton("📊 Статистика", callback_data="ai_stats")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            
+            context.user_data.clear()
+            
+        except Exception as e:
+            logger.error(f"Ошибка при обработке GitHub URL: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при загрузке с GitHub: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data="upload_github_dataset")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+
+    async def show_ai_stats_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать статистику ИИ через callback"""
+        stats = self.ai_assistant.get_stats()
+        
+        stats_text = (
+            "📊 Статистика ИИ-помощника\n\n"
+            f"🤖 Модель: {stats['current_model']}\n"
+            f"👥 Пользователей: {stats['total_users']}\n"
+            f"💬 Сообщений: {stats['total_messages']}\n"
+            f"⚙️ Статус: {'✅ Активен' if stats['is_configured'] else '❌ Ошибка'}"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("📚 Обучить на датасете", callback_data="train_dataset")],
+            [InlineKeyboardButton("🤖 Чат с ИИ", callback_data="ai_assistant")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
+        ]
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            stats_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
 
     async def show_ai_chat(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Показать чат с ИИ-помощником"""
@@ -6206,24 +6870,7 @@ def setup_mass_upload_handlers(application, mass_upload_handler):
 
 
 
-    async def show_delete_files_menu(self, query, context: ContextTypes.DEFAULT_TYPE):
     
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "🗑️ Удаление файлов\n\n"
-            "Выберите тип файлов для удаления:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📓 Лекции", callback_data="delete_lectures_menu")],
-                [InlineKeyboardButton("📝 Практические", callback_data="delete_practices_menu")],
-                [InlineKeyboardButton("📅 Расписания", callback_data="delete_schedules_menu")],
-                [InlineKeyboardButton("📦 Полезная информация", callback_data="delete_useful_menu")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-            ])
-        )
 
     async def delete_lectures_menu(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Меню удаления лекций"""
@@ -6389,560 +7036,17 @@ def setup_mass_upload_handlers(application, mass_upload_handler):
         
         context.user_data.clear()
 
-    async def show_logs(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать логи системы с кликабельными кнопками"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        logs = self.db.get_logs(limit=50)
-        
-        if not logs:
-            await self.edit_message_with_cleanup(
-                query, context,
-                "📋 Логи системы\n\nПока нет записей в логах.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
-                    [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
-                    [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
-                    [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-                ])
-            )
-            return
-        
-        # Группируем логи по уровням
-        error_logs = [log for log in logs if log['level'] == 'ERROR']
-        warning_logs = [log for log in logs if log['level'] == 'WARNING']
-        info_logs = [log for log in logs if log['level'] == 'INFO']
-        
-        logs_text = (
-            "📋 Логи системы\n\n"
-            f"❌ Ошибки: {len(error_logs)}\n"
-            f"⚠️ Предупреждения: {len(warning_logs)}\n"
-            f"ℹ️ Инфо: {len(info_logs)}\n\n"
-            "Нажмите на кнопку ниже для просмотра конкретного типа логов:"
-        )
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            logs_text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
-                [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
-                [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
-                [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-            ])
-        )
-
+    
     # =============================================================================
     # НОВЫЕ ФУНКЦИИ ДЛЯ УПРАВЛЕНИЯ ДАТАСЕТАМИ
     # =============================================================================
 
-    async def show_manage_datasets(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать интерфейс управления датасетами"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        datasets = self.ai_assistant.get_datasets_info()
-        
-        if not datasets:
-            await self.edit_message_with_cleanup(
-                query, context,
-                "📚 Управление датасетами\n\n"
-                "Пока нет загруженных датасетов.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-                ])
-            )
-            return
-        
-        # Сортируем датасеты по размеру (от большего к меньшему)
-        datasets.sort(key=lambda x: x['size_bytes'], reverse=True)
-        
-        total_size = sum(d['size_bytes'] for d in datasets)
-        total_files = len(datasets)
-        
-        message_text = (
-            "📚 Управление датасетами\n\n"
-            f"📊 Всего датасетов: {total_files}\n"
-            f"💾 Общий размер: {total_size / (1024*1024):.1f} MB\n\n"
-            "Доступные датасеты:\n"
-        )
-        
-        # Добавляем информацию о каждом датасете
-        for i, dataset in enumerate(datasets[:10]):  # Показываем первые 10
-            message_text += f"\n{i+1}. {dataset['filename']} ({dataset['size_mb']} MB)"
-        
-        if total_files > 10:
-            message_text += f"\n\n... и еще {total_files - 10} датасетов"
-        
-        keyboard = []
-        
-        # Добавляем кнопки для каждого датасета (обучение и удаление)
-        for dataset in datasets[:5]:  # Показываем кнопки для первых 5 датасетов
-            filename = dataset['filename']
-            display_name = filename[:20] + "..." if len(filename) > 20 else filename
-            
-            keyboard.append([
-                InlineKeyboardButton(f"🎯 Обучить: {display_name}", callback_data=f"train_on_dataset_{filename}"),
-                InlineKeyboardButton(f"🗑️ Удалить", callback_data=f"delete_dataset_{filename}")
-            ])
-        
-        # Если датасетов больше 5, добавляем кнопку "Показать все"
-        if total_files > 5:
-            keyboard.append([InlineKeyboardButton("📋 Показать все датасеты", callback_data="view_all_datasets")])
-        
-        keyboard.extend([
-            [InlineKeyboardButton("📤 Загрузить новый датасет", callback_data="upload_dataset")],
-            [InlineKeyboardButton("🐙 Загрузить с GitHub", callback_data="upload_github_dataset")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-        ])
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            message_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    async def delete_dataset(self, query, context: ContextTypes.DEFAULT_TYPE, dataset_name: str):
-        """Удалить датасет"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        # Подтверждение удаления
-        if not context.user_data.get(f'confirm_delete_{dataset_name}'):
-            context.user_data[f'confirm_delete_{dataset_name}'] = True
-            
-            dataset_info = self.ai_assistant.dataset_manager.get_dataset_info(dataset_name)
-            if dataset_info:
-                size_info = f" ({dataset_info['size_mb']} MB, создан {dataset_info['days_old']} дней назад)"
-            else:
-                size_info = ""
-            
-            await self.edit_message_with_cleanup(
-                query, context,
-                f"⚠️ Подтверждение удаления\n\n"
-                f"Вы уверены, что хотите удалить датасет:\n"
-                f"`{dataset_name}`{size_info}\n\n"
-                f"❌ Это действие нельзя отменить!",
-                parse_mode='Markdown',
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Да, удалить", callback_data=f"delete_dataset_{dataset_name}")],
-                    [InlineKeyboardButton("❌ Отмена", callback_data="manage_datasets")]
-                ])
-            )
-            return
-        
-        # Выполнение удаления после подтверждения
-        try:
-            success, message = self.ai_assistant.delete_dataset(dataset_name)
-            
-            # Очищаем флаг подтверждения
-            if f'confirm_delete_{dataset_name}' in context.user_data:
-                del context.user_data[f'confirm_delete_{dataset_name}']
-            
-            if success:
-                # Логируем удаление
-                self.db.add_log("INFO", f"Датасет удален: {dataset_name}", query.from_user.id)
-                
-                await self.edit_message_with_cleanup(
-                    query, context,
-                    message,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                    ])
-                )
-            else:
-                await self.edit_message_with_cleanup(
-                    query, context,
-                    message,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"delete_dataset_{dataset_name}")],
-                        [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                    ])
-                )
-                
-        except Exception as e:
-            logger.error(f"Ошибка при удалении датасета: {e}")
-            await self.edit_message_with_cleanup(
-                query, context,
-                f"❌ Произошла ошибка при удалении датасета: {str(e)}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-
-    async def start_dataset_training(self, query, context: ContextTypes.DEFAULT_TYPE, dataset_name: str):
-        """Запуск обучения на датасете с улучшенным интерфейсом"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        # Получаем информацию о датасете
-        dataset_info = self.ai_assistant.dataset_manager.get_dataset_info(dataset_name)
-        size_info = f" ({dataset_info['size_mb']} MB)" if dataset_info else ""
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            f"🔄 Запуск обучения на датасете: {dataset_name}{size_info}\n\n"
-            "📊 Процесс обучения:\n"
-            "• Загрузка и проверка данных\n"
-            "• Векторизация текстов\n" 
-            "• Обучение нейросети\n"
-            "• Сохранение модели\n\n"
-            "⏳ Это может занять несколько минут...\n"
-            "Бот продолжит работать во время обучения.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Отмена", callback_data="manage_datasets")]
-            ])
-        )
-        
-        # Используем asyncio для асинхронного выполнения
-        try:
-            success, message = await self.ai_assistant.train_on_dataset(dataset_name)
-            
-            # Логируем результат обучения
-            log_level = "INFO" if success else "ERROR"
-            self.db.add_log(log_level, f"Обучение на датасете {dataset_name}: {'успех' if success else 'ошибка'}", query.from_user.id)
-            
-            # Создаем клавиатуру в зависимости от результата
-            if success:
-                keyboard = [
-                    [InlineKeyboardButton("🤖 Чат с ИИ", callback_data="ai_assistant")],
-                    [InlineKeyboardButton("📊 Статистика", callback_data="ai_stats")],
-                    [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ]
-            else:
-                keyboard = [
-                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"train_on_dataset_{dataset_name}")],
-                    [InlineKeyboardButton("📚 Выбрать другой датасет", callback_data="manage_datasets")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ]
-            
-            await self.edit_message_with_cleanup(
-                query, context,
-                message,
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            
-        except Exception as e:
-            logger.error(f"Ошибка при обучении на датасете: {e}")
-            await self.edit_message_with_cleanup(
-                query, context,
-                f"❌ Неожиданная ошибка при обучении: {str(e)}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"train_on_dataset_{dataset_name}")],
-                    [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-
+    
     # =============================================================================
     # ОБНОВЛЕННЫЙ ИНТЕРФЕЙС ОБУЧЕНИЯ НА ДАТАСЕТАХ
     # =============================================================================
 
-    async def show_dataset_training(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать интерфейс обучения на датасетах с улучшенной навигацией"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        available_datasets = self.ai_assistant.get_datasets_info()
-        supported_formats = self.ai_assistant.self_learning_ai.dataset_trainer.get_supported_formats()
-        
-        # Форматируем информацию о поддерживаемых форматах
-        formats_text = "\n".join([f"• {fmt}" for fmt in supported_formats.values()])
-        
-        total_size = sum(d['size_bytes'] for d in available_datasets)
-        
-        keyboard = [
-            [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
-            [InlineKeyboardButton("🐙 Загрузить с GitHub", callback_data="upload_github_dataset")],
-            [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="ai_stats")]
-        ]
-        
-        if available_datasets:
-            # Показываем кнопки для обучения на доступных датасетах
-            for dataset_info in available_datasets[:3]:  # Показываем первые 3
-                btn_text = f"🎯 Обучить: {dataset_info['filename']} ({dataset_info['size_mb']} MB)"
-                keyboard.insert(0, [
-                    InlineKeyboardButton(
-                        btn_text, 
-                        callback_data=f"train_on_dataset_{dataset_info['filename']}"
-                    )
-                ])
-        
-        message_text = (
-            "📚 Обучение на датасетах\n\n"
-            f"📂 Доступно датасетов: {len(available_datasets)}\n"
-            f"💾 Общий размер: {total_size / (1024*1024):.1f} MB\n\n"
-            "📋 Поддерживаемые форматы:\n"
-            f"{formats_text}\n\n"
-            "🐙 Поддерживаются GitHub репозитории"
-        )
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            message_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
     
-
-    async def clear_ai_history(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Очистка истории AI-чата"""
-        if 'ai_conversation' in context.user_data:
-            context.user_data['ai_conversation'] = []
-        
-        self.ai_assistant.clear_conversation_history(query.from_user.id)
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "🧹 История разговора очищена!\n\n"
-            "Теперь вы можете начать новый диалог.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🤖 Задать вопрос", callback_data="ai_assistant")],
-                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
-            ])
-        )
-
-    async def start_upload_dataset(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать загрузку датасета с информацией о ограничениях"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        context.user_data.clear()
-        context.user_data['state'] = 'uploading_dataset'
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "📤 Загрузка датасета\n\n"
-            "📁 Поддерживаемые форматы:\n"
-            "• JSON, JSONL (.json, .jsonl)\n"
-            "• CSV, TSV (.csv, .tsv, .txt)\n"
-            "• Excel (.xlsx, .xls)\n"
-            "• Текстовые файлы (.txt, .md)\n"
-            "• YAML (.yaml, .yml)\n"
-            "• XML (.xml)\n"
-            "• Parquet (.parquet)\n"
-            "• Feather (.feather)\n"
-            "• Pickle (.pkl, .pickle)\n\n"
-            "⚠️ Ограничения Telegram:\n"
-            "• Максимальный размер файла: 50MB\n"
-            "• Для больших файлов используйте GitHub\n\n"
-            "💡 Для файлов больше 50MB:\n"
-            "• Используйте опцию 'Загрузить с GitHub'\n"
-            "• Разделите файл на части\n"
-            "• Используйте сжатие (.zip)\n\n"
-            "Отправьте файл датасета:\n\n"
-            "❌ Для отмены используйте /cancel",
-            parse_mode='HTML'
-        )
-
-    async def start_upload_github_dataset(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать загрузку датасета с GitHub с информацией о новых форматах"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        context.user_data.clear()
-        context.user_data['state'] = 'uploading_github_dataset'
-        
-        supported_formats = self.ai_assistant.self_learning_ai.dataset_trainer.get_supported_formats()
-        
-        formats_text = "📋 Поддерживаемые форматы:\n"
-        for format_type, extensions in supported_formats.items():
-            formats_text += f"• {format_type.upper()}: {', '.join(extensions)}\n"
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "🐙 Загрузка датасета с GitHub\n\n"
-            f"{formats_text}\n\n"
-            "🔗 Примеры работающих ссылок:\n"
-            "• <code>https://github.com/huggingface/datasets</code>\n"
-            "• <code>https://github.com/username/repo/blob/main/data.json</code>\n"
-            "• <code>https://raw.githubusercontent.com/username/repo/main/data.csv</code>\n"
-            "• <code>https://github.com/username/repo/blob/main/dataset.xlsx</code>\n\n"
-            "💡 Советы:\n"
-            "• Убедитесь, что репозиторий публичный\n"
-            "• Поддерживаются JSON, CSV, Excel, текстовые файлы и многие другие\n"
-            "• Для больших репозиторий укажите прямой путь к файлу\n\n"
-            "Отправьте ссылку на GitHub:",
-            parse_mode='HTML'
-        )
-
-    
-
-    async def save_dataset_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Сохранение загруженного датасета с проверкой размера"""
-        if not update.message.document:
-            await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, отправьте файл датасета.")
-            return
-        
-        file = await update.message.document.get_file()
-        filename = update.message.document.file_name
-        file_size = update.message.document.file_size
-        
-        # Максимальный размер для Telegram - 50MB
-        MAX_TELEGRAM_SIZE = 50 * 1024 * 1024  # 50MB в байтах
-        
-        if file_size and file_size > MAX_TELEGRAM_SIZE:
-            await self.send_message_with_cleanup(
-                update, context,
-                f"❌ Файл слишком большой для загрузки через Telegram.\n\n"
-                f"📊 Размер вашего файла: {file_size / (1024*1024):.1f}MB\n"
-                f"📏 Максимальный размер: 50MB\n\n"
-                "💡 Рекомендации:\n"
-                "• Разделите большой датасет на несколько файлов\n"
-                "• Используйте сжатые форматы (.zip, .gz)\n"
-                "• Загрузите файл через GitHub и используйте ссылку"
-            )
-            return
-        
-        # Проверяем расширение файла
-        supported_extensions = ['.json', '.csv', '.jsonl', '.xlsx', '.xls', '.txt', '.yaml', '.yml', '.xml', '.parquet', '.feather', '.pkl', '.pickle']
-        if not any(filename.endswith(ext) for ext in supported_extensions):
-            await self.send_message_with_cleanup(
-                update, context,
-                f"❌ Неподдерживаемый формат файла. Используйте: {', '.join(supported_extensions)}"
-            )
-            return
-        
-        try:
-            # Создаем директорию для датасетов если не существует
-            datasets_dir = "training_datasets"
-            os.makedirs(datasets_dir, exist_ok=True)
-            
-            file_path = os.path.join(datasets_dir, filename)
-            
-            # Показываем прогресс загрузки для файлов больше 10MB
-            if file_size and file_size > 10 * 1024 * 1024:
-                progress_msg = await update.message.reply_text(
-                    f"📥 Загрузка файла {filename}...\n"
-                    f"Размер: {file_size / (1024*1024):.1f}MB\n"
-                    "⏳ Пожалуйста, подождите..."
-                )
-            
-            # Загружаем файл
-            await file.download_to_drive(file_path)
-            
-            # Удаляем сообщение о прогрессе если было создано
-            if file_size and file_size > 10 * 1024 * 1024:
-                try:
-                    await progress_msg.delete()
-                except:
-                    pass
-            
-            # Проверяем что файл успешно загружен
-            if not os.path.exists(file_path):
-                await self.send_message_with_cleanup(
-                    update, context,
-                    "❌ Ошибка при загрузке файла. Попробуйте еще раз."
-                )
-                return
-            
-            actual_size = os.path.getsize(file_path)
-            logger.info(f"Файл {filename} успешно загружен, размер: {actual_size} байт")
-            
-            context.user_data.clear()
-            
-            await self.send_message_with_cleanup(
-                update, context,
-                f"✅ Датасет '{filename}' успешно загружен!\n\n"
-                f"📊 Размер файла: {actual_size / (1024*1024):.1f}MB\n\n"
-                "Теперь вы можете обучить ИИ на этом датасете.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📚 Обучить на этом датасете", callback_data=f"train_on_dataset_{filename}")],
-                    [InlineKeyboardButton("📚 Выбрать другой датасет", callback_data="train_dataset")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-            
-        except Exception as e:
-            logger.error(f"Ошибка при сохранении датасета: {e}")
-            await self.send_message_with_cleanup(
-                update, context,
-                f"❌ Ошибка при сохранении датасета: {str(e)}"
-            )
-                
-            context.user_data.clear()
-                
-    async def handle_github_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE, github_url: str):
-        """Обработка GitHub URL"""
-        try:
-            if not github_url.startswith('https://github.com') and not github_url.startswith('https://raw.githubusercontent.com'):
-                await self.send_message_with_cleanup(
-                    update, context,
-                    "❌ Неверный GitHub URL. Используйте ссылки вида:\n"
-                    "• https://github.com/user/repo\n"
-                    "• https://github.com/user/repo/blob/main/file.json\n"
-                    "• https://raw.githubusercontent.com/user/repo/main/file.csv"
-                )
-                return
-            
-            await update.message.chat.send_action(action="typing")
-            
-            # Скачиваем и обучаем
-            success, message = await self.ai_assistant.train_from_github(github_url)
-            
-            await self.send_message_with_cleanup(
-                update, context,
-                message,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🤖 Чат с ИИ", callback_data="ai_assistant")],
-                    [InlineKeyboardButton("📊 Статистика", callback_data="ai_stats")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-            
-            context.user_data.clear()
-            
-        except Exception as e:
-            logger.error(f"Ошибка при обработке GitHub URL: {e}")
-            await self.send_message_with_cleanup(
-                update, context,
-                f"❌ Ошибка при загрузке с GitHub: {str(e)}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data="upload_github_dataset")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-
-    async def show_ai_stats_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать статистику ИИ через callback"""
-        stats = self.ai_assistant.get_stats()
-        
-        stats_text = (
-            "📊 Статистика ИИ-помощника\n\n"
-            f"🤖 Модель: {stats['current_model']}\n"
-            f"👥 Пользователей: {stats['total_users']}\n"
-            f"💬 Сообщений: {stats['total_messages']}\n"
-            f"⚙️ Статус: {'✅ Активен' if stats['is_configured'] else '❌ Ошибка'}"
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton("📚 Обучить на датасете", callback_data="train_dataset")],
-            [InlineKeyboardButton("🤖 Чат с ИИ", callback_data="ai_assistant")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
-        ]
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            stats_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
     
 
     async def show_subject_content(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -7232,26 +7336,7 @@ def setup_mass_upload_handlers(application, mass_upload_handler):
 
     
 
-    async def update_code_from_github_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Обновить код из GitHub через callback"""
-        await self.edit_message_with_cleanup(
-            query, context,
-            "🔄 Обновление кода из GitHub...\n\n"
-            "Это может занять несколько минут. Пожалуйста, подождите."
-        )
-        
-        # Исправленный вызов - теперь это асинхронный метод
-        success, message = await self.code_manager.update_code_from_github()
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            message,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Перезапустить", callback_data="restart_bot")] if success else [],
-                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
-                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-            ])
-        )
+    
 
 
 
