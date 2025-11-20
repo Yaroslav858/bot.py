@@ -1766,6 +1766,30 @@ class SelfLearningAI:
         
         logger.info(f"SelfLearningAI инициализирован на устройстве: {self.device}")
     
+        self.dialogue_storage = "user_dialogues"
+        os.makedirs(self.dialogue_storage, exist_ok=True)
+    
+    def save_user_dialogue(self, user_id: int, dialogue_data: List[Dict]):
+        """Сохранение диалога пользователя для обучения"""
+        try:
+            user_file = os.path.join(self.dialogue_storage, f"user_{user_id}.jsonl")
+            
+            with open(user_file, 'a', encoding='utf-8') as f:
+                for message in dialogue_data:
+                    if message.get('content') and message.get('role'):
+                        message_with_timestamp = {
+                            'user_id': user_id,
+                            'timestamp': datetime.now().isoformat(),
+                            'role': message['role'],
+                            'content': message['content']
+                        }
+                        f.write(json.dumps(message_with_timestamp, ensure_ascii=False) + '\n')
+            
+            logger.info(f"Диалог пользователя {user_id} сохранен")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении диалога пользователя {user_id}: {e}")
+
     def load_model(self, filepath: str = "self_learning_model.pth"):
         """Загрузка модели и данных обучения"""
         try:
