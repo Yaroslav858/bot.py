@@ -329,7 +329,7 @@ class BotCodeManager:
                     logger.warning(f"Не удалось очистить временную директорию: {e}")
             
             if copied_files:
-                return True, f"✅ Код успешно обновлен из GitHub. Скопировано файлов: {len(copied_files)}. Требуется перезагрузка."
+                return True, f"✅ Код успешно обновлен из GitHub. Скопировано файлов: {len(copied_files)}. Требуется перезагрузция."
             else:
                 return False, "❌ Не удалось скопировать ни одного файла"
         
@@ -428,7 +428,7 @@ class BotCodeManager:
             
             # Специальная команда для очистки временных файлов
             if command.strip() == "cleanup":
-                success, message = self.cleanup_temp_files()
+                success, message = await self.cleanup_temp_files()
                 return success, message, "Команда очистки выполнена"
             
             # Выполняем команду
@@ -1969,40 +1969,40 @@ class SelfLearningAI:
             self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
             self.input_size = new_input_size
 
-def _update_output_size(self, new_output_size: int):
-    """Обновление размера выходного слоя"""
-    try:
-        # Сохраняем старые веса
-        old_weights = self.model.output_layer.weight.data.cpu().numpy()
-        old_bias = self.model.output_layer.bias.data.cpu().numpy()
-        
-        # Создаем новый выходной слой
-        in_features = self.model.output_layer.in_features
-        self.model.output_layer = nn.Linear(in_features, new_output_size).to(self.device)
-        self.output_size = new_output_size
-        
-        # Инициализируем новый слой
-        nn.init.xavier_uniform_(self.model.output_layer.weight)
-        if self.model.output_layer.bias is not None:
-            self.model.output_layer.bias.data.zero_()
-        
-        # Копируем старые веса если возможно
-        if (old_weights.shape[0] <= new_output_size and 
-            old_weights.shape[1] == in_features and
-            old_bias.shape[0] <= new_output_size):
+    def _update_output_size(self, new_output_size: int):
+        """Обновление размера выходного слоя"""
+        try:
+            # Сохраняем старые веса
+            old_weights = self.model.output_layer.weight.data.cpu().numpy()
+            old_bias = self.model.output_layer.bias.data.cpu().numpy()
             
-            self.model.output_layer.weight.data[:old_weights.shape[0]] = torch.FloatTensor(old_weights).to(self.device)
-            self.model.output_layer.bias.data[:old_bias.shape[0]] = torch.FloatTensor(old_bias).to(self.device)
-        
-        # Обновляем optimizer
-        self.optimizer = optim.Adam(self.model.parameters(), lr=self.optimizer.param_groups[0]['lr'])
-        
-        logger.info(f"Размер выходного слоя обновлен до {new_output_size}")
-        
-    except Exception as e:
-        logger.error(f"Ошибка обновления выходного слоя: {e}")
-        # Полная пересоздание модели как запасной вариант
-        self._initialize_model(self.input_size, new_output_size)
+            # Создаем новый выходной слой
+            in_features = self.model.output_layer.in_features
+            self.model.output_layer = nn.Linear(in_features, new_output_size).to(self.device)
+            self.output_size = new_output_size
+            
+            # Инициализируем новый слой
+            nn.init.xavier_uniform_(self.model.output_layer.weight)
+            if self.model.output_layer.bias is not None:
+                self.model.output_layer.bias.data.zero_()
+            
+            # Копируем старые веса если возможно
+            if (old_weights.shape[0] <= new_output_size and 
+                old_weights.shape[1] == in_features and
+                old_bias.shape[0] <= new_output_size):
+                
+                self.model.output_layer.weight.data[:old_weights.shape[0]] = torch.FloatTensor(old_weights).to(self.device)
+                self.model.output_layer.bias.data[:old_bias.shape[0]] = torch.FloatTensor(old_bias).to(self.device)
+            
+            # Обновляем optimizer
+            self.optimizer = optim.Adam(self.model.parameters(), lr=self.optimizer.param_groups[0]['lr'])
+            
+            logger.info(f"Размер выходного слоя обновлен до {new_output_size}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления выходного слоя: {e}")
+            # Полная пересоздание модели как запасной вариант
+            self._initialize_model(self.input_size, new_output_size)
 
     def learn_from_dataset(self, dataset_filename: str, epochs: int = 5) -> bool:
         """Обучение на загруженном датасете с поддержкой больших файлов"""
@@ -2183,38 +2183,6 @@ def _update_output_size(self, new_output_size: int):
         except Exception as e:
             logger.error(f"❌ Ошибка при скачивании и обучении с GitHub: {e}")
             return False
-    
-    '''def _update_output_size(self, new_output_size: int):
-        """Обновление размера выходного слоя"""
-        try:
-            # Сохраняем старые веса
-            old_weights = self.model.output_layer.weight.data.cpu().numpy()
-            old_bias = self.model.output_layer.bias.data.cpu().numpy()
-            
-            # Создаем новый выходной слой
-            in_features = self.model.output_layer.in_features
-            self.model.output_layer = nn.Linear(in_features, new_output_size).to(self.device)
-            self.output_size = new_output_size
-            
-            # Инициализируем новый слой
-            nn.init.xavier_uniform_(self.model.output_layer.weight)
-            self.model.output_layer.bias.data.zero_()
-            
-            # Копируем старые веса если возможно
-            if (old_weights.shape[0] <= new_output_size and 
-                old_weights.shape[1] == in_features and
-                old_bias.shape[0] <= new_output_size):
-                
-                self.model.output_layer.weight.data[:old_weights.shape[0]] = torch.FloatTensor(old_weights).to(self.device)
-                self.model.output_layer.bias.data[:old_bias.shape[0]] = torch.FloatTensor(old_bias).to(self.device)
-            
-            # Обновляем optimizer
-            self.optimizer = optim.Adam(self.model.parameters(), lr=self.optimizer.param_groups[0]['lr'])
-            
-            logger.info(f"Размер выходного слоя обновлен до {new_output_size}")
-            
-        except Exception as e:
-            logger.error(f"Ошибка обновления выходного слоя: {e}")'''
     
     def dataset_predict(self, text: str):
         """Предсказание категории текста с помощью обученной модели"""
@@ -2515,7 +2483,7 @@ class EnhancedAIAssistant:
         # Инициализация менеджера датасетов
         self.dataset_manager = DatasetManager()
     
-    def _check_and_perform_learning(self):  # Убрать async
+    def _check_and_perform_learning(self):
         """Проверить и выполнить самообучение если нужно"""
         try:
             time_since_last_learning = datetime.now() - self.last_learning_time
@@ -2524,19 +2492,25 @@ class EnhancedAIAssistant:
             if hours_passed >= self.learning_interval_hours:
                 logger.info("Запуск периодического самообучения из диалогов...")
                 
-                # Заменить await на прямой вызов
-                success, message = self.self_learning_ai.learn_from_user_dialogues()
-                
-                if success:
-                    logger.info("Периодическое самообучение завершено успешно")
-                else:
-                    logger.warning(f"Периодическое самообучение не удалось: {message}")
-                
-                self.last_learning_time = datetime.now()
+                # Используем asyncio для запуска в отдельном потоке
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    success, message = loop.run_until_complete(
+                        self.self_learning_ai.learn_from_user_dialogues()
+                    )
+                    
+                    if success:
+                        logger.info("Периодическое самообучение завершено успешно")
+                    else:
+                        logger.warning(f"Периодическое самообучение не удалось: {message}")
+                    
+                    self.last_learning_time = datetime.now()
+                finally:
+                    loop.close()
                 
         except Exception as e:
             logger.error(f"Ошибка при проверке самообучения: {e}")
-
 
     def get_conversation_history(self, user_id: int) -> List[Dict]:
         """Получить истории разговора для пользователя"""
@@ -2649,34 +2623,13 @@ class EnhancedAIAssistant:
             self.update_conversation_history(user_id, message, ai_response)
             
             # Периодическое самообучение
-            await self._check_and_perform_learning()
+            self._check_and_perform_learning()
             
             return ai_response, True, "EnhancedSelfLearningAI"
             
         except Exception as e:
             logger.error(f"Ошибка в улучшенном ИИ-помощнике: {e}")
             return "❌ Временно проблемы с ИИ-помощником. Попробуйте позже.", False, "Error"
-    
-    async def _check_and_perform_learning(self):
-        """Проверить и выполнить самообучение если нужно"""
-        try:
-            time_since_last_learning = datetime.now() - self.last_learning_time
-            hours_passed = time_since_last_learning.total_seconds() / 3600
-            
-            if hours_passed >= self.learning_interval_hours:
-                logger.info("Запуск периодического самообучения из диалогов...")
-                
-                success, message = await self.self_learning_ai.learn_from_user_dialogues()
-                
-                if success:
-                    logger.info("Периодическое самообучение завершено успешно")
-                else:
-                    logger.warning(f"Периодическое самообучение не удалось: {message}")
-                
-                self.last_learning_time = datetime.now()
-                
-        except Exception as e:
-            logger.error(f"Ошибка при проверке самообучения: {e}")
     
     async def force_learning_from_dialogues(self, user_id: int = None) -> Tuple[bool, str]:
         """Принудительное обучение из диалогов"""
@@ -2706,7 +2659,6 @@ class EnhancedAIAssistant:
             "is_configured": True
         }
 
-    # ИСПРАВЬТЕ в методе train_on_dataset (строка ~1400)
     async def train_on_dataset(self, dataset_filename: str) -> Tuple[bool, str]:
         """Обучение на датасете с правильной асинхронностью"""
         try:
@@ -2734,7 +2686,10 @@ class EnhancedAIAssistant:
         """Обучение на датасете с GitHub с возвратом результата и сообщения"""
         try:
             logger.info(f"🔄 Запуск обучения с GitHub: {github_url}")
-            success = self.self_learning_ai.download_and_train_from_github(github_url)
+            success = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.self_learning_ai.download_and_train_from_github(github_url)
+            )
 
             if success:
                 message = (
@@ -2948,82 +2903,13 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
     
-    async def add_subject(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Управление предметами (админ)"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        subjects = self.db.get_all_subjects()
-        
-        keyboard = [
-            [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")]
-        ]
-        
-        if subjects:
-            for subject in subjects:
-                # Получаем количество лекций и практических
-                lectures = self.db.get_lectures(subject['id'])
-                practices = self.db.get_practices(subject['id'])
-                
-                keyboard.append([
-                    InlineKeyboardButton(f"📖 {subject['name']}", callback_data=f"view_subject_{subject['id']}"),
-                    InlineKeyboardButton(f"🗑️", callback_data=f"delete_subject_{subject['id']}")
-                ])
-                keyboard.append([
-                    InlineKeyboardButton(f"   📓 Лекций: {len(lectures)}", callback_data=f"show_lectures_{subject['id']}"),
-                    InlineKeyboardButton(f"   📝 Практических: {len(practices)}", callback_data=f"show_practices_{subject['id']}")
-                ])
-    
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "📖 Управление предметами\n\n"
-            f"📊 Всего предметов: {len(subjects)}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-async def handle_add_subject(self, update: Update, context: ContextTypes.DEFAULT_TYPE, subject_name: str):
-    """Обработка добавления предмета"""
-    if not subject_name.strip():
-        await self.send_message_with_cleanup(update, context, "❌ Название предмета не может быть пустым")
-        return
-    
-    try:
-        subject_id = self.db.add_subject(subject_name.strip())
-        
-        if subject_id:
-            await self.send_message_with_cleanup(
-                update, context,
-                f"✅ Предмет '{subject_name}' успешно добавлен!",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Добавить еще предмет", callback_data="add_subject")],
-                    [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-        else:
-            await self.send_message_with_cleanup(
-                update, context,
-                f"❌ Не удалось добавить предмет '{subject_name}'",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Попробовать снова", callback_data="add_subject")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-    
-    except Exception as e:
-        logger.error(f"Ошибка при добавлении предмета: {e}")
-        await self.send_message_with_cleanup(
-            update, context,
-            f"❌ Ошибка при добавлении предмета: {str(e)}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-            ])
-        )
-    
-    context.user_data.clear()
+    def add_subject(self, name: str) -> int:
+        """Добавить предмет"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('INSERT INTO subjects (name) VALUES (?)', (name,))
+            conn.commit()
+            return cursor.lastrowid
     
     def get_lectures(self, subject_id: int) -> List[Dict]:
         """Получить все лекции по предмету"""
@@ -3116,113 +3002,16 @@ async def handle_add_subject(self, update: Update, context: ContextTypes.DEFAULT
             ''', (subject_id,))
             return [dict(row) for row in cursor.fetchall()]
     
-    async def start_add_teacher(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать добавление преподавателя"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        # Получаем список предметов для выбора
-        subjects = self.db.get_all_subjects()
-        
-        if not subjects:
-            await self.edit_message_with_cleanup(
-                query, context,
-                "👨‍🏫 Добавление преподавателя\n\n"
-                "❌ Сначала добавьте предметы, чтобы привязать преподавателя.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-            return
-        
-        context.user_data.clear()
-        context.user_data['state'] = 'adding_teacher_subject'
-        
-        # Создаем клавиатуру с предметами
-        keyboard = []
-        for subject in subjects:
-            keyboard.append([InlineKeyboardButton(
-                f"📖 {subject['name']}", 
-                callback_data=f"select_subject_{subject['id']}"
-            )])
-        
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")])
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "👨‍🏫 Добавление преподавателя\n\n"
-            "Выберите предмет для преподавателя:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    async def handle_select_subject_for_teacher(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка выбора предмета для преподавателя"""
-        context.user_data['teacher_subject_id'] = subject_id
-        context.user_data['state'] = 'adding_teacher_name'
-        
-        subject = self.db.get_subject(subject_id)
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            f"👨‍🏫 Добавление преподавателя\n\n"
-            f"📖 Предмет: {subject['name']}\n\n"
-            "Введите ФИО преподавателя:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Назад к выбору предмета", callback_data="add_teacher")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-            ])
-        )
-
-    async def handle_add_teacher(self, update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_name: str):
-        """Обработка добавления преподавателя"""
-        if not teacher_name.strip():
-            await self.send_message_with_cleanup(update, context, "❌ ФИО преподавателя не может быть пустым")
-            return
-        
-        subject_id = context.user_data.get('teacher_subject_id')
-        if not subject_id:
-            await self.send_message_with_cleanup(update, context, "❌ Ошибка: предмет не выбран")
-            context.user_data.clear()
-            return
-        
-        try:
-            teacher_id = self.db.add_teacher(teacher_name.strip(), subject_id)
-            subject = self.db.get_subject(subject_id)
-            
-            if teacher_id:
-                await self.send_message_with_cleanup(
-                    update, context,
-                    f"✅ Преподаватель '{teacher_name}' успешно добавлен!\n"
-                    f"📖 Предмет: {subject['name']}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("👨‍🏫 Добавить еще преподавателя", callback_data="add_teacher")],
-                        [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
-                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                    ])
-                )
-            else:
-                await self.send_message_with_cleanup(
-                    update, context,
-                    f"❌ Не удалось добавить преподавателя '{teacher_name}'",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="add_teacher")],
-                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                    ])
-                )
-        
-        except Exception as e:
-            logger.error(f"Ошибка при добавлении преподавателя: {e}")
-            await self.send_message_with_cleanup(
-                update, context,
-                f"❌ Ошибка при добавлении преподавателя: {str(e)}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-        
-        context.user_data.clear()
+    def add_teacher(self, name: str, subject_id: int) -> int:
+        """Добавить преподавателя"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO teachers (name, subject_id) 
+                VALUES (?, ?)
+            ''', (name, subject_id))
+            conn.commit()
+            return cursor.lastrowid
     
     def get_teacher(self, teacher_id: int) -> Optional[Dict]:
         """Получить преподавателя по ID"""
@@ -3384,131 +3173,7 @@ class EnhancedLectureBot:
         # Текст для помощника
         self.helper_text = "👋 Привет! Помогаю в разработке курсовых (от 2000), а также в подготовке отчетов учебных и производственных практик (от 500), проектных работ и докладов (от 200), практических заданий и конспектов (от 35). Создаю сайты (html, css, js, react, vue, django, php, nodeJS, tilda) и пишу программы (c#, pascal, python, delphia)"
         self.helper_contact = "@RaffLik"
-    async def view_all_datasets(self, query, context):
-        """Показать все датасеты"""
-        datasets = self.ai_assistant.get_datasets_info()
         
-        if not datasets:
-            await self.edit_message_with_cleanup(
-                query, context,
-                "📚 Все датасеты\n\nНет доступных датасетов.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
-                    [InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")]
-                ])
-            )
-            return
-        
-        message_text = "📚 Все датасеты:\n\n"
-        for i, dataset in enumerate(datasets, 1):
-            message_text += f"{i}. {dataset['filename']} ({dataset['size_mb']} MB)\n"
-        
-        keyboard = []
-        for dataset in datasets:
-            filename = dataset['filename']
-            display_name = filename[:15] + "..." if len(filename) > 15 else filename
-            
-            keyboard.append([
-                InlineKeyboardButton(f"🎯 {display_name}", callback_data=f"train_on_dataset_{filename}"),
-                InlineKeyboardButton(f"🗑️", callback_data=f"delete_dataset_{filename}")
-            ])
-        
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")])
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            message_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-
-    async def diagnose_training(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Диагностика обучения датасетов"""
-        if update.effective_user.id not in ADMIN_IDS:
-            await self.send_message_with_cleanup(update, context, "❌ У вас нет доступа к этой команде")
-            return
-        
-        # Получаем список датасетов
-        datasets = self.ai_assistant.get_datasets_info()
-        
-        if not datasets:
-            await self.send_message_with_cleanup(
-                update, context,
-                "📚 Диагностика обучения\n\n❌ Нет доступных датасетов для диагностики."
-            )
-            return
-        
-        diagnostic_results = []
-        
-        for dataset in datasets[:3]:  # Проверяем первые 3 датасета
-            dataset_name = dataset['filename']
-            
-            try:
-                # 1. Проверяем существование файла
-                filepath = os.path.join("training_datasets", dataset_name)
-                if not os.path.exists(filepath):
-                    diagnostic_results.append(f"❌ {dataset_name}: Файл не найден")
-                    continue
-                
-                # 2. Проверяем размер файла
-                file_size = os.path.getsize(filepath)
-                if file_size == 0:
-                    diagnostic_results.append(f"❌ {dataset_name}: Файл пустой ({file_size} байт)")
-                    continue
-                
-                # 3. Пробуем загрузить датасет
-                X, y = self.ai_assistant.self_learning_ai.dataset_trainer.load_dataset(dataset_name)
-                
-                if len(X) == 0:
-                    diagnostic_results.append(f"❌ {dataset_name}: Не удалось извлечь данные (X пустой)")
-                    continue
-                
-                if len(y) == 0:
-                    diagnostic_results.append(f"❌ {dataset_name}: Не удалось извлечь метки (y пустой)")
-                    continue
-                
-                # 4. Проверяем размерности
-                dim_info = f"X: {X.shape}, y: {y.shape}, классы: {len(np.unique(y))}"
-                
-                # 5. Пробуем небольшое обучение (2 примера, 1 эпоха)
-                try:
-                    test_X = X[:2]  # Берем всего 2 примера для теста
-                    test_y = y[:2]
-                    
-                    losses = self.ai_assistant.self_learning_ai.learn_from_data(
-                        test_X, test_y, epochs=1, batch_size=2
-                    )
-                    
-                    if losses and len(losses) > 0:
-                        diagnostic_results.append(f"✅ {dataset_name}: ОБУЧЕНИЕ РАБОТАЕТ! {dim_info}")
-                    else:
-                        diagnostic_results.append(f"❌ {dataset_name}: Обучение не запускается {dim_info}")
-                        
-                except Exception as e:
-                    diagnostic_results.append(f"❌ {dataset_name}: Ошибка обучения: {str(e)[:100]}...")
-                    
-            except Exception as e:
-                diagnostic_results.append(f"❌ {dataset_name}: Общая ошибка: {str(e)[:100]}...")
-        
-        # Формируем итоговое сообщение
-        result_text = "🔍 Диагностика обучения датасетов\n\n"
-        result_text += "\n".join(diagnostic_results)
-        
-        # Добавляем рекомендации
-        result_text += "\n\n💡 Рекомендации:\n"
-        result_text += "• ✅ - датасет готов к обучению\n"
-        result_text += "• ❌ - требуется исправление\n"
-        result_text += "• Проверьте формат данных в проблемных датасетах"
-        
-        await self.send_message_with_cleanup(
-            update, context,
-            result_text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Запустить обучение", callback_data="train_dataset")],
-                [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-            ])
-        )
     def _initialize_bot(self):
         """Инициализация улучшенного бота"""
         try:
@@ -3625,26 +3290,6 @@ class EnhancedLectureBot:
             logger.error(f"Ошибка при редактировании сообщения: {e}")
             fake_update = Update(update_id=0, message=query.message)
             await self.send_message_with_cleanup(fake_update, context, "❌ Лекция не найдена в базе данных")
-
-    async def start_add_subject(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать добавление предмета"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        context.user_data.clear()
-        context.user_data['state'] = 'adding_subject'
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "➕ Добавление нового предмета\n\n"
-            "Введите название предмета:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-            ])
-        )
-
-    
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -3972,25 +3617,10 @@ class EnhancedLectureBot:
                 await self.force_learning_callback(query, context)
             elif data == "confirm_restart":
                 await self.confirm_restart(query, context)
-            elif data == "update_code":
-                await self.update_code_from_github_callback(query, context)
-
-            elif data.startswith("view_logs_"):
-                # Обработка кликабельных кнопок просмотра логов
-                log_type = data.split("_")[2]
-                await self.show_logs_by_type(query, context, log_type)
             elif data == "cleanup_temp":
                 await self.cleanup_temp_files_callback(query, context)
-            elif data == "update_code":
-                await self.update_code_from_github_callback(query, context)
-            elif data == "create_backup":
-                await self.create_system_backup(query, context)
-            elif data == "system_status":
-                await self.show_system_status(query, context)
             elif data == "diagnose_training":
-                await self.diagnose_training(update, context)
-            elif data == "cleanup_temp":
-                await self.cleanup_temp_files_callback(query, context)
+                await self.diagnose_training(query, context)
             elif data == "ai_assistant":
                 await self.show_ai_chat(query, context)
             elif data == "subjects":
@@ -4074,6 +3704,24 @@ class EnhancedLectureBot:
                 await self.delete_useful_content(query, content_id, context)
             elif data == "view_all_datasets":
                 await self.view_all_datasets(query, context)
+            elif data == "add_subject":
+                await self.start_add_subject(query, context)
+            elif data == "add_teacher":
+                await self.start_add_teacher(query, context)
+            elif data.startswith("select_subject_"):
+                subject_id = int(data.split("_")[2])
+                await self.handle_select_subject_for_teacher(query, subject_id, context)
+            elif data == "upload_file":
+                await self.start_single_upload(query, context)
+            elif data.startswith("upload_subject_"):
+                subject_id = int(data.split("_")[2])
+                await self.handle_select_upload_subject(query, subject_id, context)
+            elif data.startswith("upload_type_"):
+                upload_type = data.split("_")[2]
+                await self.handle_select_upload_type(query, upload_type, context)
+            elif data.startswith("view_logs_"):
+                log_type = data.split("_")[2]
+                await self.show_logs_by_type(query, context, log_type)
             else:
                 # НЕИЗВЕСТНЫЕ КОМАНДЫ - просто показываем alert и НЕ переходим в меню
                 logger.warning(f"Неизвестный callback_data: {data}")
@@ -4210,7 +3858,7 @@ class EnhancedLectureBot:
         )
     async def confirm_restart(self, query, context):
         """Подтверждение перезапуска"""
-        success, message = await self.code_manager.restart_bot()
+        success, message = self.code_manager.restart_bot()
         await self.edit_message_with_cleanup(query, context, message)
 
     async def view_all_datasets(self, query, context):
@@ -4429,7 +4077,7 @@ class EnhancedLectureBot:
 
     async def handle_file_viewing(self, update: Update, context: ContextTypes.DEFAULT_TYPE, file_path: str):
         """Обработка просмотра файлов"""
-        success, content, message = await self.code_manager.view_file(file_path)
+        success, content, message = self.code_manager.view_file(file_path)
         
         if success:
             # Обрезаем длинный контент для Telegram
@@ -4485,7 +4133,7 @@ class EnhancedLectureBot:
     async def handle_restart_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE, confirmation: str):
         """Обработка подтверждения перезапуска"""
         if confirmation.lower() in ['да', 'yes', 'y', 'confirm']:
-            success, message = await self.code_manager.restart_bot()
+            success, message = self.code_manager.restart_bot()
             await self.send_message_with_cleanup(update, context, message)
         else:
             await self.send_message_with_cleanup(
@@ -5129,33 +4777,6 @@ class EnhancedLectureBot:
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
-    async def show_ai_chat(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать чат с ИИ"""
-        await self.ai_chat(Update(update_id=0, callback_query=query), context)
-
-    '''async def show_subjects(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать предметы"""
-        await self.show_subjects(Update(update_id=0, callback_query=query), context)'''
-
-    async def show_schedule(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать расписание"""
-        await self.show_schedule(Update(update_id=0, callback_query=query), context)
-
-    async def show_helper(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать помощника"""
-        await self.show_helper(Update(update_id=0, callback_query=query), context)
-
-    async def show_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать полезную информацию"""
-        await self.show_useful_info(Update(update_id=0, callback_query=query), context)
-
-    async def show_support(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать поддержку"""
-        await self.show_support(Update(update_id=0, callback_query=query), context)
-
-    async def show_admin_panel(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать админ-панель"""
-        await self.admin_panel(Update(update_id=0, callback_query=query), context)
     async def show_subject_content(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
         """Показать контент предмета (лекции и практические)"""
         logger.info(f"Показать контент предмета: {subject_id}")
@@ -6216,6 +5837,265 @@ class EnhancedLectureBot:
     async def shutdown(self):
         """Закрытие ресурсов при завершении работы"""
         pass
+
+    # =============================================================================
+    # ДОПОЛНИТЕЛЬНЫЕ МЕТОДЫ ДЛЯ ОБРАБОТКИ КНОПОК
+    # =============================================================================
+
+    async def start_add_subject(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать добавление предмета"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'adding_subject'
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "➕ Добавление нового предмета\n\n"
+            "Введите название предмета:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    async def handle_add_subject(self, update: Update, context: ContextTypes.DEFAULT_TYPE, subject_name: str):
+        """Обработка добавления предмета"""
+        if not subject_name.strip():
+            await self.send_message_with_cleanup(update, context, "❌ Название предмета не может быть пустым")
+            return
+        
+        try:
+            subject_id = self.db.add_subject(subject_name.strip())
+            
+            if subject_id:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"✅ Предмет '{subject_name}' успешно добавлен!",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("➕ Добавить еще предмет", callback_data="add_subject")],
+                        [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+            else:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"❌ Не удалось добавить предмет '{subject_name}'",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="add_subject")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+        
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении предмета: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при добавлении предмета: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        
+        context.user_data.clear()
+
+    async def start_add_teacher(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать добавление преподавателя"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        # Получаем список предметов для выбора
+        subjects = self.db.get_all_subjects()
+        
+        if not subjects:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "👨‍🏫 Добавление преподавателя\n\n"
+                "❌ Сначала добавьте предметы, чтобы привязать преподавателя.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'adding_teacher_subject'
+        
+        # Создаем клавиатуру с предметами
+        keyboard = []
+        for subject in subjects:
+            keyboard.append([InlineKeyboardButton(
+                f"📖 {subject['name']}", 
+                callback_data=f"select_subject_{subject['id']}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "👨‍🏫 Добавление преподавателя\n\n"
+            "Выберите предмет для преподавателя:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def handle_select_subject_for_teacher(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора предмета для преподавателя"""
+        context.user_data['teacher_subject_id'] = subject_id
+        context.user_data['state'] = 'adding_teacher_name'
+        
+        subject = self.db.get_subject(subject_id)
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            f"👨‍🏫 Добавление преподавателя\n\n"
+            f"📖 Предмет: {subject['name']}\n\n"
+            "Введите ФИО преподавателя:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад к выбору предмета", callback_data="add_teacher")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    async def handle_add_teacher(self, update: Update, context: ContextTypes.DEFAULT_TYPE, teacher_name: str):
+        """Обработка добавления преподавателя"""
+        if not teacher_name.strip():
+            await self.send_message_with_cleanup(update, context, "❌ ФИО преподавателя не может быть пустым")
+            return
+        
+        subject_id = context.user_data.get('teacher_subject_id')
+        if not subject_id:
+            await self.send_message_with_cleanup(update, context, "❌ Ошибка: предмет не выбран")
+            context.user_data.clear()
+            return
+        
+        try:
+            teacher_id = self.db.add_teacher(teacher_name.strip(), subject_id)
+            subject = self.db.get_subject(subject_id)
+            
+            if teacher_id:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"✅ Преподаватель '{teacher_name}' успешно добавлен!\n"
+                    f"📖 Предмет: {subject['name']}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("👨‍🏫 Добавить еще преподавателя", callback_data="add_teacher")],
+                        [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+            else:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"❌ Не удалось добавить преподавателя '{teacher_name}'",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="add_teacher")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+        
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении преподавателя: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при добавлении преподавателя: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        
+        context.user_data.clear()
+
+    async def diagnose_training(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Диагностика обучения датасетов"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        # Получаем список датасетов
+        datasets = self.ai_assistant.get_datasets_info()
+        
+        if not datasets:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📚 Диагностика обучения\n\n❌ Нет доступных датасетов для диагностики."
+            )
+            return
+        
+        diagnostic_results = []
+        
+        for dataset in datasets[:3]:  # Проверяем первые 3 датасета
+            dataset_name = dataset['filename']
+            
+            try:
+                # 1. Проверяем существование файла
+                filepath = os.path.join("training_datasets", dataset_name)
+                if not os.path.exists(filepath):
+                    diagnostic_results.append(f"❌ {dataset_name}: Файл не найден")
+                    continue
+                
+                # 2. Проверяем размер файла
+                file_size = os.path.getsize(filepath)
+                if file_size == 0:
+                    diagnostic_results.append(f"❌ {dataset_name}: Файл пустой ({file_size} байт)")
+                    continue
+                
+                # 3. Пробуем загрузить датасет
+                X, y = self.ai_assistant.self_learning_ai.dataset_trainer.load_dataset(dataset_name)
+                
+                if len(X) == 0:
+                    diagnostic_results.append(f"❌ {dataset_name}: Не удалось извлечь данные (X пустой)")
+                    continue
+                
+                if len(y) == 0:
+                    diagnostic_results.append(f"❌ {dataset_name}: Не удалось извлечь метки (y пустой)")
+                    continue
+                
+                # 4. Проверяем размерности
+                dim_info = f"X: {X.shape}, y: {y.shape}, классы: {len(np.unique(y))}"
+                
+                # 5. Пробуем небольшое обучение (2 примера, 1 эпоха)
+                try:
+                    test_X = X[:2]  # Берем всего 2 примера для теста
+                    test_y = y[:2]
+                    
+                    losses = self.ai_assistant.self_learning_ai.learn_from_data(
+                        test_X, test_y, epochs=1, batch_size=2
+                    )
+                    
+                    if losses and len(losses) > 0:
+                        diagnostic_results.append(f"✅ {dataset_name}: ОБУЧЕНИЕ РАБОТАЕТ! {dim_info}")
+                    else:
+                        diagnostic_results.append(f"❌ {dataset_name}: Обучение не запускается {dim_info}")
+                        
+                except Exception as e:
+                    diagnostic_results.append(f"❌ {dataset_name}: Ошибка обучения: {str(e)[:100]}...")
+                    
+            except Exception as e:
+                diagnostic_results.append(f"❌ {dataset_name}: Общая ошибка: {str(e)[:100]}...")
+        
+        # Формируем итоговое сообщение
+        result_text = "🔍 Диагностика обучения датасетов\n\n"
+        result_text += "\n".join(diagnostic_results)
+        
+        # Добавляем рекомендации
+        result_text += "\n\n💡 Рекомендации:\n"
+        result_text += "• ✅ - датасет готов к обучению\n"
+        result_text += "• ❌ - требуется исправление\n"
+        result_text += "• Проверьте формат данных в проблемных датасетах"
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            result_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Запустить обучение", callback_data="train_dataset")],
+                [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+            ])
+        )
 
 def main():
     """Функция для запуска улучшенного бота"""
