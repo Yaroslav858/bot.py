@@ -218,130 +218,7 @@ class BotCodeManager:
             logger.error(f"Ошибка создания бэкапа: {e}")
             return False, f"❌ Ошибка создания бэкапа: {str(e)}"
 
-    async def update_code_from_github(self, repo_url: str = None, branch: str = "main") -> Tuple[bool, str]:
-        """Асинхронная версия обновления кода из GitHub с улучшенной обработкой ошибок"""
-        try:
-            if not repo_url:
-                repo_url = "https://github.com/Yaroslav858/bot.py.git"  
-            
-            temp_dir = "temp_update"
-            
-            # УЛУЧШЕННАЯ ОЧИСТКА: проверяем и полностью удаляем существующую директорию
-            if os.path.exists(temp_dir):
-                logger.info(f"Удаляем существующую директорию {temp_dir}")
-                try:
-                    # Рекурсивно удаляем всю директорию
-                    import shutil
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    
-                    # Дополнительная проверка что директория удалена
-                    if os.path.exists(temp_dir):
-                        # Если не удалось удалить, пробуем другой подход
-                        import subprocess
-                        if os.name == 'nt':  # Windows
-                            subprocess.run(f'rmdir /s /q "{temp_dir}"', shell=True, capture_output=True)
-                        else:  # Linux/Mac
-                            subprocess.run(f'rm -rf "{temp_dir}"', shell=True, capture_output=True)
-                        
-                        # Ждем немного и проверяем снова
-                        await asyncio.sleep(2)
-                        
-                        if os.path.exists(temp_dir):
-                            return False, f"❌ Не удалось удалить существующую директорию {temp_dir}"
-                            
-                except Exception as e:
-                    logger.error(f"Ошибка удаления директории {temp_dir}: {e}")
-                    return False, f"❌ Ошибка удаления временной директории: {str(e)}"
     
-            # Ждем немного чтобы система освободила ресурсы
-            await asyncio.sleep(1)
-            
-            # Проверяем что директории действительно нет
-            if os.path.exists(temp_dir):
-                return False, f"❌ Директория {temp_dir} все еще существует после удаления"
-            
-            # Клонируем репозиторий
-            logger.info(f"Клонируем репозиторий {repo_url} ветка {branch}")
-            process = await asyncio.create_subprocess_exec(
-                "git", "clone", "-b", branch, "--depth", "1", repo_url, temp_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else stdout.decode()
-                logger.error(f"Ошибка клонирования: {error_msg}")
-                
-                # Очищаем директорию в случае ошибки
-                if os.path.exists(temp_dir):
-                    try:
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                    except:
-                        pass
-                
-                return False, f"❌ Ошибка клонирования: {error_msg}"
-            
-            # Создаем бэкап текущего кода
-            backup_success, backup_msg = await self.create_backup()
-            if not backup_success:
-                # Очищаем временную директорию
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                return False, f"❌ Не удалось создать бэкап: {backup_msg}"
-            
-            # Копируем новые файлы (исключая конфигурационные)
-            exclude_files = {'bot_database.db', 'self_learning_model.pth', 'config.json', 'training_datasets', 'backups', 'user_dialogues'}
-            
-            copied_files = []
-            for item in os.listdir(temp_dir):
-                if item in exclude_files or item.startswith('.'):
-                    continue
-                    
-                src_path = os.path.join(temp_dir, item)
-                dst_path = os.path.join('.', item)
-                
-                try:
-                    if os.path.isdir(src_path):
-                        if os.path.exists(dst_path):
-                            logger.info(f"Удаляем существующую директорию {dst_path}")
-                            shutil.rmtree(dst_path, ignore_errors=True)
-                        logger.info(f"Копируем директорию {item}")
-                        shutil.copytree(src_path, dst_path)
-                    else:
-                        logger.info(f"Копируем файл {item}")
-                        shutil.copy2(src_path, dst_path)
-                    
-                    copied_files.append(item)
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка копирования {item}: {e}")
-                    # Продолжаем копирование других файлов
-            
-            logger.info(f"Скопировано файлов: {len(copied_files)}")
-            
-            # Очищаем временную директорию
-            if os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as e:
-                    logger.warning(f"Не удалось очистить временную директорию: {e}")
-            
-            if copied_files:
-                return True, f"✅ Код успешно обновлен из GitHub. Скопировано файлов: {len(copied_files)}. Требуется перезагрузция."
-            else:
-                return False, "❌ Не удалось скопировать ни одного файла"
-        
-        except Exception as e:
-            logger.error(f"Ошибка обновления кода: {e}")
-            # Гарантированная очистка временной директории
-            if os.path.exists("temp_update"):
-                try:
-                    shutil.rmtree("temp_update", ignore_errors=True)
-                except:
-                    pass
-            return False, f"❌ Ошибка обновления: {str(e)}"
 
     def _get_dir_size(self, path: str) -> str:
         """Получить размер директории"""
@@ -2729,431 +2606,928 @@ class EnhancedAIAssistant:
 # КЛАССЫ БАЗЫ ДАННЫХ И ОСНОВНОГО БОТА
 # =============================================================================
 
+import sqlite3
+import os
+import logging
+from typing import List, Dict, Optional, Tuple, Any
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 class Database:
-    """Реальная реализация базы данных SQLite"""
-    
-    def __init__(self, db_path: str = "bot_database.db"):
-        self.db_path = db_path
+    def __init__(self, db_name: str = "bot_database.db"):
+        self.db_name = db_name
         self.init_database()
-    
-    def get_connection(self):
-        """Получить соединение с базой данных"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
+
+    def get_connection(self) -> sqlite3.Connection:
+        """Создание соединения с базой данных"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row  # Для доступа к колонкам по имени
         return conn
-    
+
     def init_database(self):
-        """Инициализация таблиц базы данных"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Таблица пользователей
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER UNIQUE NOT NULL,
-                    username TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Таблица предметов
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS subjects (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Таблица преподавателей
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS teachers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL,
-                    subject_id INTEGER NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (subject_id) REFERENCES subjects (id) ON DELETE CASCADE
-                )
-            ''')
-            
-            # Таблица лекций
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS lectures (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    subject_id INTEGER NOT NULL,
-                    number INTEGER,
-                    name TEXT,
-                    file_path TEXT NOT NULL,
-                    teacher_id INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (subject_id) REFERENCES subjects (id) ON DELETE CASCADE,
-                    FOREIGN KEY (teacher_id) REFERENCES teachers (id) ON DELETE SET NULL,
-                    UNIQUE(subject_id, number)
-                )
-            ''')
-            
-            # Таблица практических работ
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS practices (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    subject_id INTEGER NOT NULL,
-                    number INTEGER,
-                    name TEXT,
-                    file_path TEXT NOT NULL,
-                    teacher_id INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (subject_id) REFERENCES subjects (id) ON DELETE CASCADE,
-                    FOREIGN KEY (teacher_id) REFERENCES teachers (id) ON DELETE SET NULL,
-                    UNIQUE(subject_id, number)
-                )
-            ''')
-            
-            # Таблица папок полезной информации
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS useful_folders (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Таблица полезного контента
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS useful_content (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    folder_id INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (folder_id) REFERENCES useful_folders (id) ON DELETE SET NULL
-                )
-            ''')
-            
-            # Таблица расписания
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS schedule (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT NOT NULL,
-                    file_path TEXT NOT NULL,
-                    description TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            # Таблица логов
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    level TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    user_id INTEGER,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            conn.commit()
-    
-    def add_log(self, level: str, message: str, user_id: int = None):
-        """Добавление записи в логи"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                'INSERT INTO logs (level, message, user_id) VALUES (?, ?, ?)',
-                (level, message, user_id)
+        """Инициализация базы данных с поддержкой преподавателей"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Включаем поддержку внешних ключей
+        cursor.execute("PRAGMA foreign_keys = ON")
+        
+         # Таблица для управления расписанием (если нужно)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS schedule_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            conn.commit()
-    
-    def get_logs(self, limit: int = 100, level: str = None) -> List[Dict]:
-        """Получить логи"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            if level:
-                cursor.execute(
-                    'SELECT * FROM logs WHERE level = ? ORDER BY created_at DESC LIMIT ?',
-                    (level, limit)
-                )
-            else:
-                cursor.execute('SELECT * FROM logs ORDER BY created_at DESC LIMIT ?', (limit,))
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def add_user(self, user_id: int, username: str = None):
+        ''')
+
+        # Таблица пользователей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY,
+                username TEXT,
+                registered_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Таблица предметов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS subjects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT
+            )
+        ''')
+        
+        # Таблица преподавателей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS teachers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                subject_id INTEGER,
+                FOREIGN KEY (subject_id) REFERENCES subjects (id) ON DELETE CASCADE
+            )
+        ''')
+        
+        # Таблица лекций
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS lectures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL,
+                teacher_id INTEGER,
+                number INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (subject_id) REFERENCES subjects (id) ON DELETE CASCADE,
+                FOREIGN KEY (teacher_id) REFERENCES teachers (id) ON DELETE SET NULL,
+                UNIQUE(subject_id, teacher_id, number)
+            )
+        ''')
+        
+        # Таблица практических работ
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS practices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject_id INTEGER NOT NULL,
+                teacher_id INTEGER,
+                number INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                uploaded_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (subject_id) REFERENCES subjects (id) ON DELETE CASCADE,
+                FOREIGN KEY (teacher_id) REFERENCES teachers (id) ON DELETE SET NULL,
+                UNIQUE(subject_id, teacher_id, number)
+            )
+        ''')
+        
+        # Таблица для полезного контента
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS useful_content (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # Таблица логов
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                user_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Добавляем недостающие столбцы если они не существуют
+        self._add_missing_columns(cursor)
+        
+        conn.commit()
+        conn.close()
+
+    def _add_missing_columns(self, cursor: sqlite3.Cursor):
+        """Добавление недостающих столбцов в таблицы"""
+        tables_columns = {
+            'lectures': ['teacher_id'],
+            'practices': ['teacher_id']
+        }
+        
+        for table, columns in tables_columns.items():
+            for column in columns:
+                try:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
+                    logger.info(f"Добавлен столбец {column} в таблицу {table}")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column name" not in str(e):
+                        logger.warning(f"Не удалось добавить столбец {column} в {table}: {e}")
+
+    def add_user(self, user_id: int, username: str):
         """Добавление пользователя"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
             cursor.execute(
-                'INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)',
+                'INSERT OR REPLACE INTO users (id, username) VALUES (?, ?)',
                 (user_id, username)
             )
             conn.commit()
-    
-    def get_all_subjects(self) -> List[Dict]:
-        """Получить все предметы"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM subjects ORDER BY name')
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def get_subject(self, subject_id: int) -> Optional[Dict]:
-        """Получить предмет по ID"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
+            logger.info(f"Добавлен пользователь: {user_id}, {username}")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении пользователя: {e}")
+        finally:
+            conn.close()
+
+    def add_subject(self, name: str, description: str = "") -> Optional[int]:
+        """Добавление предмета"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'INSERT OR IGNORE INTO subjects (name, description) VALUES (?, ?)',
+                (name, description)
+            )
+            
+            # Получаем ID добавленного предмета
+            cursor.execute('SELECT id FROM subjects WHERE name = ?', (name,))
+            result = cursor.fetchone()
+            subject_id = result['id'] if result else None
+            
+            conn.commit()
+            logger.info(f"Добавлен предмет: {name}, ID: {subject_id}")
+            return subject_id
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении предмета: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def add_teacher(self, name: str, subject_id: int) -> Optional[int]:
+        """Добавление преподавателя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Проверяем существование предмета
+            cursor.execute('SELECT id FROM subjects WHERE id = ?', (subject_id,))
+            if not cursor.fetchone():
+                logger.error(f"Предмет с ID {subject_id} не существует")
+                return None
+            
+            cursor.execute(
+                'INSERT INTO teachers (name, subject_id) VALUES (?, ?)',
+                (name, subject_id)
+            )
+            
+            teacher_id = cursor.lastrowid
+            conn.commit()
+            logger.info(f"Добавлен преподаватель: {name}, ID: {teacher_id}")
+            return teacher_id
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении преподавателя: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def add_lecture(self, subject_id: int, number: int, file_path: str, teacher_id: Optional[int] = None) -> bool:
+        """Добавление лекции"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(file_path):
+                logger.error(f"Файл не существует: {file_path}")
+                return False
+            
+            # Используем INSERT OR REPLACE для упрощения
+            cursor.execute(
+                '''INSERT OR REPLACE INTO lectures 
+                   (subject_id, teacher_id, number, file_path) 
+                   VALUES (?, ?, ?, ?)''',
+                (subject_id, teacher_id, number, file_path)
+            )
+            
+            conn.commit()
+            logger.info(f"Добавлена лекция: предмет {subject_id}, номер {number}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении лекции: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_subjects_simple(self) -> List[Dict[str, Any]]:
+        """Простое получение предметов без сложных JOIN"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT id, name FROM subjects ORDER BY name')
+            subjects = [dict(row) for row in cursor.fetchall()]
+            return subjects
+        except Exception as e:
+            logger.error(f"Ошибка при получении предметов: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def add_practice(self, subject_id: int, number: int, file_path: str, teacher_id: Optional[int] = None) -> bool:
+        """Добавление практической работы"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(file_path):
+                logger.error(f"Файл не существует: {file_path}")
+                return False
+            
+            cursor.execute(
+                '''INSERT OR REPLACE INTO practices 
+                   (subject_id, teacher_id, number, file_path) 
+                   VALUES (?, ?, ?, ?)''',
+                (subject_id, teacher_id, number, file_path)
+            )
+            
+            conn.commit()
+            logger.info(f"Добавлена практика: предмет {subject_id}, номер {number}")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении практической работы: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def add_useful_content(self, title: str, file_path: str, content_type: str) -> Optional[int]:
+        """Добавление полезного контента"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(file_path):
+                logger.error(f"Файл не существует: {file_path}")
+                return None
+            
+            cursor.execute(
+                'INSERT INTO useful_content (title, file_path, type) VALUES (?, ?, ?)',
+                (title, file_path, content_type)
+            )
+            
+            content_id = cursor.lastrowid
+            conn.commit()
+            logger.info(f"Добавлен полезный контент: {title}, ID: {content_id}")
+            return content_id
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении полезного контента: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_all_subjects(self) -> List[Dict[str, Any]]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('''
+                SELECT s.*, 
+                    COALESCE(GROUP_CONCAT(t.name, ', '), 'Нет преподавателей') as teacher_names
+                FROM subjects s
+                LEFT JOIN teachers t ON s.id = t.subject_id
+                GROUP BY s.id
+                ORDER BY s.name
+            ''')
+            
+            subjects = []
+            for row in cursor.fetchall():
+                subject = dict(row)
+                # Гарантируем, что teacher_names всегда строка
+                subject['teacher_names'] = subject.get('teacher_names', 'Нет преподавателей')
+                subjects.append(subject)
+            
+            return subjects
+        except Exception as e:
+            logger.error(f"Ошибка при получении предметов: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_subject(self, subject_id: int) -> Optional[Dict[str, Any]]:
+        """Получение предмета по ID"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
             cursor.execute('SELECT * FROM subjects WHERE id = ?', (subject_id,))
             row = cursor.fetchone()
-            return dict(row) if row else None
-    
-    def add_subject(self, name: str) -> int:
-        """Добавить предмет"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('INSERT INTO subjects (name) VALUES (?)', (name,))
-            conn.commit()
-            return cursor.lastrowid
-    
-    def get_lectures(self, subject_id: int) -> List[Dict]:
-        """Получить все лекции по предмету"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT l.*, t.name as teacher_name 
-                FROM lectures l 
-                LEFT JOIN teachers t ON l.teacher_id = t.id 
-                WHERE l.subject_id = ? 
-                ORDER BY l.number
-            ''', (subject_id,))
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def get_practices(self, subject_id: int) -> List[Dict]:
-        """Получить все практические работы по предмету"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT p.*, t.name as teacher_name 
-                FROM practices p 
-                LEFT JOIN teachers t ON p.teacher_id = t.id 
-                WHERE p.subject_id = ? 
-                ORDER BY p.number
-            ''', (subject_id,))
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def get_lecture(self, subject_id: int, lecture_num: int) -> Optional[Dict]:
-        """Получить конкретную лекцию"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT l.*, t.name as teacher_name 
-                FROM lectures l 
-                LEFT JOIN teachers t ON l.teacher_id = t.id 
-                WHERE l.subject_id = ? AND l.number = ?
-            ''', (subject_id, lecture_num))
+            
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при получении предмета: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_teachers_by_subject(self, subject_id: int) -> List[Dict[str, Any]]:
+        """Получение преподавателей по предмету"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                'SELECT * FROM teachers WHERE subject_id = ? ORDER BY name',
+                (subject_id,)
+            )
+            
+            teachers = [dict(row) for row in cursor.fetchall()]
+            return teachers
+        except Exception as e:
+            logger.error(f"Ошибка при получении преподавателей: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_teacher(self, teacher_id: int) -> Optional[Dict[str, Any]]:
+        """Получение преподавателя по ID"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT * FROM teachers WHERE id = ?', (teacher_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при получении преподавателя: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_all_useful_content(self) -> List[Dict[str, Any]]:
+        """Получение всего полезного контента"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT * FROM useful_content ORDER BY created_at DESC')
+            content_list = [dict(row) for row in cursor.fetchall()]
+            return content_list
+        except Exception as e:
+            logger.error(f"Ошибка при получении полезного контента: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_useful_content_by_id(self, content_id: int) -> Optional[Dict[str, Any]]:
+        """Получение полезного контента по ID"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT * FROM useful_content WHERE id = ?', (content_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
-    
-    def get_practice(self, subject_id: int, practice_num: int) -> Optional[Dict]:
-        """Получить конкретную практическую работу"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT p.*, t.name as teacher_name 
-                FROM practices p 
-                LEFT JOIN teachers t ON p.teacher_id = t.id 
-                WHERE p.subject_id = ? AND p.number = ?
-            ''', (subject_id, practice_num))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-    
-    def add_lecture(self, subject_id: int, number: int, file_path: str, 
-                   teacher_id: int = None, name: str = None) -> int:
-        """Добавить лекцию"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO lectures 
-                (subject_id, number, name, file_path, teacher_id) 
-                VALUES (?, ?, ?, ?, ?)
-            ''', (subject_id, number, name, file_path, teacher_id))
+        except Exception as e:
+            logger.error(f"Ошибка при получении контента {content_id}: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def delete_useful_content(self, content_id: int) -> bool:
+        """Удаление полезного контента"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("DELETE FROM useful_content WHERE id = ?", (content_id,))
+            success = cursor.rowcount > 0
             conn.commit()
-            return cursor.lastrowid
-    
-    def add_practice(self, subject_id: int, number: int, file_path: str, 
-                    teacher_id: int = None, name: str = None) -> int:
-        """Добавить практическую работу"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO practices 
-                (subject_id, number, name, file_path, teacher_id) 
-                VALUES (?, ?, ?, ?, ?)
-            ''', (subject_id, number, name, file_path, teacher_id))
+            logger.info(f"Удален полезный контент: ID {content_id}")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка при удалении контента {content_id}: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def add_log_entry(self, level: str, message: str, user_id: Optional[int] = None) -> bool:
+        """Добавление записи в лог"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "INSERT INTO logs (level, message, user_id) VALUES (?, ?, ?)",
+                (level, message, user_id)
+            )
             conn.commit()
-            return cursor.lastrowid
-    
-    def get_teachers_by_subject(self, subject_id: int) -> List[Dict]:
-        """Получить преподавателей по предмету"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT t.*, s.name as subject_name 
-                FROM teachers t 
-                JOIN subjects s ON t.subject_id = s.id 
-                WHERE t.subject_id = ? 
-                ORDER BY t.name
-            ''', (subject_id,))
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def add_teacher(self, name: str, subject_id: int) -> int:
-        """Добавить преподавателя"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO teachers (name, subject_id) 
-                VALUES (?, ?)
-            ''', (name, subject_id))
-            conn.commit()
-            return cursor.lastrowid
-    
-    def get_teacher(self, teacher_id: int) -> Optional[Dict]:
-        """Получить преподавателя по ID"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT t.*, s.name as subject_name 
-                FROM teachers t 
-                JOIN subjects s ON t.subject_id = s.id 
-                WHERE t.id = ?
-            ''', (teacher_id,))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-    
-    def delete_lecture(self, subject_id: int, lecture_num: int):
-        """Удалить лекцию"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM lectures 
-                WHERE subject_id = ? AND number = ?
-            ''', (subject_id, lecture_num))
-            conn.commit()
-    
-    def delete_practice(self, subject_id: int, practice_num: int):
-        """Удалить практическую работу"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                DELETE FROM practices 
-                WHERE subject_id = ? AND number = ?
-            ''', (subject_id, practice_num))
-            conn.commit()
-    
-    def get_all_useful_folders(self) -> List[Dict]:
-        """Получить все папки полезной информации"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM useful_folders ORDER BY name')
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def get_useful_folder(self, folder_id: int) -> Optional[Dict]:
-        """Получить папку полезной информации по ID"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM useful_folders WHERE id = ?', (folder_id,))
-            row = cursor.fetchone()
-            return dict(row) if row else None
-    
-    def add_useful_folder(self, name: str) -> int:
-        """Добавить папку полезной информации"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('INSERT INTO useful_folders (name) VALUES (?)', (name,))
-            conn.commit()
-            return cursor.lastrowid
-    
-    def get_all_useful_content(self, folder_id: int = None) -> List[Dict]:
-        """Получить весь полезный контент (с опциональной фильтрацией по папке)"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            if folder_id is not None:
-                cursor.execute('''
-                    SELECT uc.*, uf.name as folder_name 
-                    FROM useful_content uc 
-                    LEFT JOIN useful_folders uf ON uc.folder_id = uf.id 
-                    WHERE uc.folder_id = ? 
-                    ORDER BY uc.title
-                ''', (folder_id,))
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении лога: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_logs(self, limit: int = 100, log_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Получение логов с фильтрацией по типу"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if log_type:
+                cursor.execute(
+                    "SELECT * FROM logs WHERE level = ? ORDER BY created_at DESC LIMIT ?",
+                    (log_type.upper(), limit)
+                )
             else:
-                cursor.execute('''
-                    SELECT uc.*, uf.name as folder_name 
-                    FROM useful_content uc 
-                    LEFT JOIN useful_folders uf ON uc.folder_id = uf.id 
-                    ORDER BY uc.title
-                ''')
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def get_useful_content(self, content_id: int) -> Optional[Dict]:
-        """Получить полезный контент по ID"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT uc.*, uf.name as folder_name 
-                FROM useful_content uc 
-                LEFT JOIN useful_folders uf ON uc.folder_id = uf.id 
-                WHERE uc.id = ?
-            ''', (content_id,))
+                cursor.execute(
+                    "SELECT * FROM logs ORDER BY created_at DESC LIMIT ?",
+                    (limit,)
+                )
+            
+            logs = [dict(row) for row in cursor.fetchall()]
+            return logs
+        except Exception as e:
+            logger.error(f"Ошибка при получении логов: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_subject_lectures_count(self, subject_id: int) -> int:
+        """Получение количества лекций по предмету"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) FROM lectures WHERE subject_id = ?",
+                (subject_id,)
+            )
+            return cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Ошибка при подсчете лекций: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def get_subject_practices_count(self, subject_id: int) -> int:
+        """Получение количества практик по предмету"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT COUNT(*) FROM practices WHERE subject_id = ?",
+                (subject_id,)
+            )
+            return cursor.fetchone()[0]
+        except Exception as e:
+            logger.error(f"Ошибка при подсчете практик: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def get_teacher_by_name_and_subject(self, name: str, subject_id: int) -> Optional[Dict[str, Any]]:
+        """Получение преподавателя по имени и предмету"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT * FROM teachers WHERE name = ? AND subject_id = ?",
+                (name, subject_id)
+            )
             row = cursor.fetchone()
             return dict(row) if row else None
-    
-    def add_useful_content(self, title: str, file_path: str, content_type: str, 
-                          folder_id: int = None) -> int:
-        """Добавить полезный контент"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
+        except Exception as e:
+            logger.error(f"Ошибка при поиске преподавателя: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def update_teacher_subject(self, teacher_id: int, subject_id: int) -> bool:
+        """Обновление предмета преподавателя"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "UPDATE teachers SET subject_id = ? WHERE id = ?",
+                (subject_id, teacher_id)
+            )
+            success = cursor.rowcount > 0
+            conn.commit()
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении преподавателя: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def get_all_teachers(self) -> List[Dict[str, Any]]:
+        """Получение всех преподавателей"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
             cursor.execute('''
-                INSERT INTO useful_content (title, file_path, type, folder_id) 
-                VALUES (?, ?, ?, ?)
-            ''', (title, file_path, content_type, folder_id))
+                SELECT t.*, s.name as subject_name 
+                FROM teachers t 
+                LEFT JOIN subjects s ON t.subject_id = s.id 
+                ORDER BY t.name
+            ''')
+            teachers = [dict(row) for row in cursor.fetchall()]
+            return teachers
+        except Exception as e:
+            logger.error(f"Ошибка при получении преподавателей: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def search_useful_content(self, query: str) -> List[Dict[str, Any]]:
+        """Поиск полезного контента"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT * FROM useful_content WHERE title LIKE ? ORDER BY created_at DESC",
+                (f'%{query}%',)
+            )
+            content = [dict(row) for row in cursor.fetchall()]
+            return content
+        except Exception as e:
+            logger.error(f"Ошибка при поиске контента: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_recent_content(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Получение последнего добавленного контента"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute(
+                "SELECT * FROM useful_content ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            content = [dict(row) for row in cursor.fetchall()]
+            return content
+        except Exception as e:
+            logger.error(f"Ошибка при получении последнего контента: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def cleanup_orphaned_files(self) -> int:
+        """Очистка записей о несуществующих файлах"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            # Для лекций
+            cursor.execute("SELECT id, file_path FROM lectures")
+            lectures = cursor.fetchall()
+            deleted_lectures = 0
+            
+            for lecture in lectures:
+                if not os.path.exists(lecture['file_path']):
+                    cursor.execute("DELETE FROM lectures WHERE id = ?", (lecture['id'],))
+                    deleted_lectures += 1
+            
+            # Для практик
+            cursor.execute("SELECT id, file_path FROM practices")
+            practices = cursor.fetchall()
+            deleted_practices = 0
+            
+            for practice in practices:
+                if not os.path.exists(practice['file_path']):
+                    cursor.execute("DELETE FROM practices WHERE id = ?", (practice['id'],))
+                    deleted_practices += 1
+            
+            # Для полезного контента
+            cursor.execute("SELECT id, file_path FROM useful_content")
+            useful_content = cursor.fetchall()
+            deleted_content = 0
+            
+            for content in useful_content:
+                if not os.path.exists(content['file_path']):
+                    cursor.execute("DELETE FROM useful_content WHERE id = ?", (content['id'],))
+                    deleted_content += 1
+            
             conn.commit()
-            return cursor.lastrowid
-    
-    def delete_useful_content(self, content_id: int):
-        """Удалить полезный контент"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM useful_content WHERE id = ?', (content_id,))
-            conn.commit()
-    
-    def get_all_schedule(self) -> List[Dict]:
-        """Получить все расписания"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM schedule ORDER BY created_at DESC')
-            return [dict(row) for row in cursor.fetchall()]
-    
-    def get_schedule(self, schedule_id: int) -> Optional[Dict]:
-        """Получить расписание по ID"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM schedule WHERE id = ?', (schedule_id,))
+            total_deleted = deleted_lectures + deleted_practices + deleted_content
+            logger.info(f"Очищено orphaned-записей: {total_deleted}")
+            return total_deleted
+            
+        except Exception as e:
+            logger.error(f"Ошибка при очистке orphaned-файлов: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def get_lectures(self, subject_id: int, teacher_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Получение лекций по предмету"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if teacher_id:
+                cursor.execute(
+                    'SELECT * FROM lectures WHERE subject_id = ? AND teacher_id = ? ORDER BY number',
+                    (subject_id, teacher_id)
+                )
+            else:
+                cursor.execute(
+                    'SELECT * FROM lectures WHERE subject_id = ? ORDER BY number',
+                    (subject_id,)
+                )
+            
+            lectures = [dict(row) for row in cursor.fetchall()]
+            return lectures
+        except Exception as e:
+            logger.error(f"Ошибка при получении лекций: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_practices(self, subject_id: int, teacher_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Получение практических работ по предмету"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if teacher_id:
+                cursor.execute(
+                    'SELECT * FROM practices WHERE subject_id = ? AND teacher_id = ? ORDER BY number',
+                    (subject_id, teacher_id)
+                )
+            else:
+                cursor.execute(
+                    'SELECT * FROM practices WHERE subject_id = ? ORDER BY number',
+                    (subject_id,)
+                )
+            
+            practices = [dict(row) for row in cursor.fetchall()]
+            return practices
+        except Exception as e:
+            logger.error(f"Ошибка при получении практик: {e}")
+            return []
+        finally:
+            conn.close()
+
+    def get_lecture(self, subject_id: int, number: int, teacher_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Получение конкретной лекции"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if teacher_id:
+                cursor.execute(
+                    'SELECT * FROM lectures WHERE subject_id = ? AND teacher_id = ? AND number = ?',
+                    (subject_id, teacher_id, number)
+                )
+            else:
+                cursor.execute(
+                    'SELECT * FROM lectures WHERE subject_id = ? AND number = ?',
+                    (subject_id, number)
+                )
+            
             row = cursor.fetchone()
-            return dict(row) if row else None
-    
-    def add_schedule(self, title: str, file_path: str, description: str = None) -> int:
-        """Добавить расписание"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO schedule (title, file_path, description) 
-                VALUES (?, ?, ?)
-            ''', (title, file_path, description))
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при получении лекции: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def _check_and_add_missing_columns(self, cursor):
+        """Проверка и добавление отсутствующих колонок в таблицы"""
+        try:
+            # Проверяем существование колонки folder_id в useful_content
+            cursor.execute("PRAGMA table_info(useful_content)")
+            columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'folder_id' not in columns:
+                logger.info("Добавляем отсутствующую колонку folder_id в useful_content")
+                cursor.execute('ALTER TABLE useful_content ADD COLUMN folder_id INTEGER')
+            
+            # Проверяем другие возможные отсутствующие колонки
+            cursor.execute("PRAGMA table_info(useful_folders)")
+            useful_folders_columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'name' not in useful_folders_columns:
+                logger.info("Добавляем отсутствующую колонку name в useful_folders")
+                cursor.execute('ALTER TABLE useful_folders ADD COLUMN name TEXT NOT NULL UNIQUE')
+                
+        except Exception as e:
+            logger.error(f"Ошибка при проверке/добавлении колонок: {e}")
+    def get_practice(self, subject_id: int, number: int, teacher_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """Получение конкретной практической работы"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if teacher_id:
+                cursor.execute(
+                    'SELECT * FROM practices WHERE subject_id = ? AND teacher_id = ? AND number = ?',
+                    (subject_id, teacher_id, number)
+                )
+            else:
+                cursor.execute(
+                    'SELECT * FROM practices WHERE subject_id = ? AND number = ?',
+                    (subject_id, number)
+                )
+            
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при получении практики: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_useful_content(self, content_id: int) -> Optional[Dict[str, Any]]:
+        """Получение полезного контента по ID"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT * FROM useful_content WHERE id = ?', (content_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                return dict(row)
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка при получении контента: {e}")
+            return None
+        finally:
+            conn.close()
+
+    '''def get_all_useful_content(self) -> List[Dict[str, Any]]:
+        """Получение всего полезного контента"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT * FROM useful_content ORDER BY id DESC')
+            content_list = [dict(row) for row in cursor.fetchall()]
+            return content_list
+        except Exception as e:
+            logger.error(f"Ошибка при получении контента: {e}")
+            return []
+        finally:
+            conn.close()'''
+
+    def delete_lecture(self, subject_id: int, number: int, teacher_id: Optional[int] = None) -> bool:
+        """Удалить лекцию"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if teacher_id:
+                cursor.execute(
+                    "DELETE FROM lectures WHERE subject_id = ? AND number = ? AND teacher_id = ?",
+                    (subject_id, number, teacher_id)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM lectures WHERE subject_id = ? AND number = ? AND (teacher_id IS NULL OR teacher_id = '')",
+                    (subject_id, number)
+                )
+            
+            success = cursor.rowcount > 0
             conn.commit()
-            return cursor.lastrowid
-    
-    def delete_schedule(self, schedule_id: int):
-        """Удалить расписание"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM schedule WHERE id = ?', (schedule_id,))
+            logger.info(f"Удалена лекция: предмет {subject_id}, номер {number}")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка при удалении лекции: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def delete_practice(self, subject_id: int, number: int, teacher_id: Optional[int] = None) -> bool:
+        """Удалить практическую работу"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            if teacher_id:
+                cursor.execute(
+                    "DELETE FROM practices WHERE subject_id = ? AND number = ? AND teacher_id = ?",
+                    (subject_id, number, teacher_id)
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM practices WHERE subject_id = ? AND number = ? AND (teacher_id IS NULL OR teacher_id = '')",
+                    (subject_id, number)
+                )
+            
+            success = cursor.rowcount > 0
             conn.commit()
+            logger.info(f"Удалена практика: предмет {subject_id}, номер {number}")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка при удалении практики: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def delete_useful_content(self, content_id: int) -> bool:
+        """Удаление полезного контента"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("DELETE FROM useful_content WHERE id = ?", (content_id,))
+            success = cursor.rowcount > 0
+            
+            conn.commit()
+            logger.info(f"Удален контент: ID {content_id}")
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка при удалении контента: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def diagnose_database(self) -> bool:
+        """Диагностика базы данных"""
+        print("=== ДИАГНОСТИКА БАЗЫ ДАННЫХ ===")
+        
+        # Проверяем файл базы данных
+        if not os.path.exists(self.db_name):
+            print(f"❌ Файл базы данных '{self.db_name}' не существует")
+            return False
+        
+        print(f"✅ Файл базы данных '{self.db_name}' существует")
+        
+        # Проверяем подключение и таблицы
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Проверяем основные таблицы
+            required_tables = ['users', 'subjects', 'teachers', 'lectures', 'practices', 'useful_content']
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing_tables = [table[0] for table in cursor.fetchall()]
+            
+            print("Существующие таблицы:", existing_tables)
+            
+            for table in required_tables:
+                if table in existing_tables:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    print(f"✅ Таблица '{table}': {count} записей")
+                else:
+                    print(f"❌ Таблица '{table}' отсутствует")
+            
+            conn.close()
+            return True
+            
+        except Exception as e:
+            print(f"❌ Ошибка при диагностике: {e}")
+            return False
 
 # =============================================================================
 # ОБНОВЛЕННЫЙ КЛАСС LectureBot С НОВЫМИ ФУНКЦИЯМИ
@@ -3373,6 +3747,461 @@ class EnhancedLectureBot:
             logger.error(f"Неожиданная ошибка в button_handler: {e}")
             await query.answer("❌ Произошла ошибка", show_alert=True)
 
+    async def restart_bot_confirmation(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Подтверждение перезапуска бота"""
+        await self.edit_message_with_cleanup(
+            query, context,
+            "⚠️ Подтверждение перезапуска\n\n"
+            "Вы уверены, что хотите перезапустить бота?\n\n"
+            "Бот будет временно недоступен на несколько секунд.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Да, перезапустить", callback_data="confirm_restart")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="code_manager")]
+            ])
+        )
+
+
+    async def list_backups(self) -> List[Dict[str, Any]]:
+        """Получить список бэкапов"""
+        backups = []
+        try:
+            for item in os.listdir(self.backup_dir):
+                backup_path = os.path.join(self.backup_dir, item)
+                if os.path.isdir(backup_path):
+                    info_file = os.path.join(backup_path, "backup_info.json")
+                    if os.path.exists(info_file):
+                        with open(info_file, 'r') as f:
+                            info = json.load(f)
+                        backups.append({
+                            "name": item,
+                            "timestamp": info.get("timestamp", ""),
+                            "size": info.get("total_size", "0 MB")
+                        })
+        except Exception as e:
+            logger.error(f"Ошибка получения списка бэкапов: {e}")
+        
+        return sorted(backups, key=lambda x: x["timestamp"], reverse=True)
+
+    # Добавляем остальные методы, которые были в оригинальном классе
+    async def create_backup(self) -> Tuple[bool, str]:
+        """Асинхронная версия создания бэкапа"""
+        return self.create_backup_sync()
+
+    def view_file(self, file_path: str) -> Tuple[bool, str, str]:
+        """Просмотреть содержимое файла"""
+        try:
+            if not os.path.exists(file_path):
+                return False, "", f"❌ Файл не найден: {file_path}"
+            
+            # Проверяем размер файла
+            file_size = os.path.getsize(file_path)
+            if file_size > 100 * 1024:  # 100KB лимит
+                return False, "", f"❌ Файл слишком большой ({file_size} байт). Максимум 100KB."
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            return True, content, f"✅ Файл прочитан: {file_path}"
+            
+        except Exception as e:
+            logger.error(f"Ошибка чтения файла: {e}")
+            return False, "", f"❌ Ошибка чтения файла: {str(e)}"
+
+    async def edit_file(self, file_path: str, new_content: str) -> Tuple[bool, str]:
+        """Редактировать файл"""
+        try:
+            if not os.path.exists(file_path):
+                return False, f"❌ Файл не найден: {file_path}"
+            
+            # Создаем бэкап файла
+            backup_path = f"{file_path}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            shutil.copy2(file_path, backup_path)
+            
+            # Записываем новый контент
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            
+            return True, f"✅ Файл успешно обновлен. Бэкап: {backup_path}"
+            
+        except Exception as e:
+            logger.error(f"Ошибка редактирования файла: {e}")
+            return False, f"❌ Ошибка редактирования: {str(e)}"
+
+    async def execute_command(self, command: str) -> Tuple[bool, str, str]:
+        """Выполнить команду на сервере"""
+        try:
+            # Безопасность: ограничиваем опасные команды
+            dangerous_commands = ['rm -rf', 'format', 'dd', 'mkfs', 'chmod 777']
+            if any(cmd in command for cmd in dangerous_commands):
+                return False, "", "❌ Опасная команда запрещена"
+            
+            # Специальная команда для очистки временных файлов
+            if command.strip() == "cleanup":
+                success, message = await self.cleanup_temp_files()
+                return success, message, "Команда очистки выполнена"
+            
+            # Выполняем команду
+            result = subprocess.run(
+                command, 
+                shell=True, 
+                capture_output=True, 
+                text=True, 
+                timeout=30
+            )
+            
+            output = result.stdout if result.stdout else result.stderr
+            success = result.returncode == 0
+            
+            return success, output, f"Код возврата: {result.returncode}"
+            
+        except subprocess.TimeoutExpired:
+            return False, "", "❌ Команда превысила лимит времени (30 секунд)"
+        except Exception as e:
+            logger.error(f"Ошибка выполнения команды: {e}")
+            return False, "", f"❌ Ошибка выполнения: {str(e)}"
+        
+    async def confirm_restart(self, query, context):
+        """Подтверждение перезапуска"""
+        success, message = self.code_manager.restart_bot()
+        await self.edit_message_with_cleanup(query, context, message)
+
+    async def view_all_datasets(self, query, context):
+        """Показать все датасеты"""
+        datasets = self.ai_assistant.get_datasets_info()
+        
+        if not datasets:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📚 Все датасеты\n\nНет доступных датасетов.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")]
+                ])
+            )
+            return
+        
+        message_text = "📚 Все датасеты:\n\n"
+        for i, dataset in enumerate(datasets, 1):
+            message_text += f"{i}. {dataset['filename']} ({dataset['size_mb']} MB)\n"
+        
+        keyboard = []
+        for dataset in datasets:
+            filename = dataset['filename']
+            display_name = filename[:15] + "..." if len(filename) > 15 else filename
+            
+            keyboard.append([
+                InlineKeyboardButton(f"🎯 {display_name}", callback_data=f"train_on_dataset_{filename}"),
+                InlineKeyboardButton(f"🗑️", callback_data=f"delete_dataset_{filename}")
+            ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message_text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def start_command_execution(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать выполнение команды"""
+        context.user_data['state'] = 'executing_command'
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "⚙️ Выполнение команды\n\n"
+            "Введите команду для выполнения на сервере:\n\n"
+            "Примеры безопасных команд:\n"
+            "• ls -la\n"
+            "• pwd\n"
+            "• python --version\n"
+            "• pip list\n\n"
+            "⚠️ Опасные команды заблокированы\n"
+            "❌ Для отмены используйте /cancel",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="code_manager")]
+            ])
+        )
+
+    async def create_system_backup(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Создать бэкап системы"""
+        await self.edit_message_with_cleanup(
+            query, context,
+            "💾 Создание бэкапа системы...\n\n"
+            "Пожалуйста, подождите."
+        )
+        
+        # Исправленный вызов - теперь это асинхронный метод
+        success, message = await self.code_manager.create_backup()
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Список бэкапов", callback_data="list_backups")],
+                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")]
+            ])
+        )
+
+    async def list_system_backups(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать список бэкапов"""
+        backups = await self.code_manager.list_backups()
+        
+        if not backups:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📋 Список бэкапов\n\n"
+                "Бэкапы не найдены.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("💾 Создать бэкап", callback_data="create_backup")],
+                    [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")]
+                ])
+            )
+            return
+        
+        backup_text = "📋 Список бэкапов\n\n"
+        for i, backup in enumerate(backups[:10]):  # Показываем первые 10
+            backup_text += f"{i+1}. {backup['name']}\n"
+            backup_text += f"   📅 {backup['timestamp'][:10]} | 💾 {backup['size']}\n\n"
+        
+        if len(backups) > 10:
+            backup_text += f"... и еще {len(backups) - 10} бэкапов\n"
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            backup_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💾 Создать бэкап", callback_data="create_backup")],
+                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")]
+            ])
+        )
+
+    async def force_learning_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для принудительного обучения"""
+        await self.force_learning(Update(update_id=0, callback_query=query), context)
+
+    async def show_logs_by_type(self, query, context: ContextTypes.DEFAULT_TYPE, log_type: str):
+        """Показать логи по типу с кликабельными кнопками"""
+        # Добавляем проверку прав доступа
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        logs = self.db.get_logs(limit=50, level=log_type.upper() if log_type != 'all' else None)
+        
+        if not logs:
+            await self.edit_message_with_cleanup(
+                query, context,
+                f"📋 Логи ({log_type})\n\nНет записей.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
+                    [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
+                    [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
+                    [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        # Группируем логи по уровням для статистики
+        error_count = len([log for log in logs if log['level'] == 'ERROR'])
+        warning_count = len([log for log in logs if log['level'] == 'WARNING'])
+        info_count = len([log for log in logs if log['level'] == 'INFO'])
+        
+        logs_text = (
+            f"📋 Логи ({log_type})\n\n"
+            f"❌ Ошибки: {error_count}\n"
+            f"⚠️ Предупреждения: {warning_count}\n"
+            f"ℹ️ Инфо: {info_count}\n\n"
+            "Последние записи:\n"
+        )
+        
+        # Показываем последние 8 записей
+        for i, log in enumerate(logs[:8]):
+            time_str = log['created_at'][11:19]  # Только время
+            level_icon = "❌" if log['level'] == 'ERROR' else "⚠️" if log['level'] == 'WARNING' else "ℹ️"
+            logs_text += f"\n{time_str} {level_icon} {log['message'][:60]}..."
+        
+        if len(logs) > 8:
+            logs_text += f"\n\n... и еще {len(logs) - 8} записей"
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            logs_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
+                [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
+                [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
+                [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
+                [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
+            ])
+        )
+
+    async def update_code_from_github(self, repo_url: str = None, branch: str = "main") -> Tuple[bool, str]:
+        """Асинхронная версия обновления кода из GitHub с улучшенной обработкой ошибок"""
+        try:
+            if not repo_url:
+                repo_url = "https://github.com/Yaroslav858/bot.py.git"  
+            
+            temp_dir = "temp_update"
+            
+            # УЛУЧШЕННАЯ ОЧИСТКА: проверяем и полностью удаляем существующую директорию
+            if os.path.exists(temp_dir):
+                logger.info(f"Удаляем существующую директорию {temp_dir}")
+                try:
+                    # Рекурсивно удаляем всю директорию
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    
+                    # Дополнительная проверка что директория удалена
+                    if os.path.exists(temp_dir):
+                        # Если не удалось удалить, пробуем другой подход
+                        import subprocess
+                        if os.name == 'nt':  # Windows
+                            subprocess.run(f'rmdir /s /q "{temp_dir}"', shell=True, capture_output=True)
+                        else:  # Linux/Mac
+                            subprocess.run(f'rm -rf "{temp_dir}"', shell=True, capture_output=True)
+                        
+                        # Ждем немного и проверяем снова
+                        await asyncio.sleep(2)
+                        
+                        if os.path.exists(temp_dir):
+                            return False, f"❌ Не удалось удалить существующую директорию {temp_dir}"
+                            
+                except Exception as e:
+                    logger.error(f"Ошибка удаления директории {temp_dir}: {e}")
+                    return False, f"❌ Ошибка удаления временной директории: {str(e)}"
+    
+            # Ждем немного чтобы система освободила ресурсы
+            await asyncio.sleep(1)
+            
+            # Проверяем что директории действительно нет
+            if os.path.exists(temp_dir):
+                return False, f"❌ Директория {temp_dir} все еще существует после удаления"
+            
+            # Клонируем репозиторий
+            logger.info(f"Клонируем репозиторий {repo_url} ветка {branch}")
+            process = await asyncio.create_subprocess_exec(
+                "git", "clone", "-b", branch, "--depth", "1", repo_url, temp_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else stdout.decode()
+                logger.error(f"Ошибка клонирования: {error_msg}")
+                
+                # Очищаем директорию в случае ошибки
+                if os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except:
+                        pass
+                
+                return False, f"❌ Ошибка клонирования: {error_msg}"
+            
+            # Создаем бэкап текущего кода
+            backup_success, backup_msg = await self.create_backup()
+            if not backup_success:
+                # Очищаем временную директорию
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                return False, f"❌ Не удалось создать бэкап: {backup_msg}"
+            
+            # Копируем новые файлы (исключая конфигурационные)
+            exclude_files = {'bot_database.db', 'self_learning_model.pth', 'config.json', 'training_datasets', 'backups', 'user_dialogues'}
+            
+            copied_files = []
+            for item in os.listdir(temp_dir):
+                if item in exclude_files or item.startswith('.'):
+                    continue
+                    
+                src_path = os.path.join(temp_dir, item)
+                dst_path = os.path.join('.', item)
+                
+                try:
+                    if os.path.isdir(src_path):
+                        if os.path.exists(dst_path):
+                            logger.info(f"Удаляем существующую директорию {dst_path}")
+                            shutil.rmtree(dst_path, ignore_errors=True)
+                        logger.info(f"Копируем директорию {item}")
+                        shutil.copytree(src_path, dst_path)
+                    else:
+                        logger.info(f"Копируем файл {item}")
+                        shutil.copy2(src_path, dst_path)
+                    
+                    copied_files.append(item)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка копирования {item}: {e}")
+                    # Продолжаем копирование других файлов
+            
+            logger.info(f"Скопировано файлов: {len(copied_files)}")
+            
+            # Очищаем временную директорию
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"Не удалось очистить временную директорию: {e}")
+            
+            if copied_files:
+                return True, f"✅ Код успешно обновлен из GitHub. Скопировано файлов: {len(copied_files)}. Требуется перезагрузция."
+            else:
+                return False, "❌ Не удалось скопировать ни одного файла"
+        
+        except Exception as e:
+            logger.error(f"Ошибка обновления кода: {e}")
+            # Гарантированная очистка временной директории
+            if os.path.exists("temp_update"):
+                try:
+                    shutil.rmtree("temp_update", ignore_errors=True)
+                except:
+                    pass
+            return False, f"❌ Ошибка обновления: {str(e)}"
+
+
+    async def show_system_status(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать статус системы"""
+        status = await self.code_manager.get_system_status()
+        
+        if "error" in status:
+            status_text = f"❌ Ошибка получения статуса: {status['error']}"
+        else:
+            system = status.get('system', {})
+            bot = status.get('bot', {})
+            
+            status_text = (
+                "📊 Статус системы\n\n"
+                "🖥️ Система:\n"
+                f"• Платформа: {system.get('platform', 'N/A')}\n"
+                f"• Python: {system.get('python_version', 'N/A').split()[0]}\n"
+                f"• Время работы: {system.get('bot_uptime', 'N/A')}\n"
+                f"• CPU: {system.get('cpu_usage', 'N/A')}%\n"
+                f"• Память: {system.get('memory_usage', 'N/A')}%\n"
+                f"• Диск: {system.get('disk_usage', 'N/A')}%\n"
+                f"• Процессы: {system.get('active_processes', 'N/A')}\n\n"
+                "🤖 Бот:\n"
+                f"• База данных: {bot.get('database_size', 'N/A')}\n"
+                f"• Файлы логов: {bot.get('log_files_count', 'N/A')}\n"
+                f"• Датасеты: {bot.get('training_datasets_count', 'N/A')}\n"
+                f"• Модель ИИ: {bot.get('ai_model_status', 'N/A')}\n\n"
+                f"🕐 {status.get('status', 'N/A')}\n"
+                f"⏰ Обновлено: {status.get('timestamp', '')[:19]}"
+            )
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            status_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Обновить статус", callback_data="system_status")],
+                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
+                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+            ])
+        )
+
+
     async def cancel_operation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отмена любой операции"""
         context.user_data.clear()
@@ -3408,6 +4237,109 @@ class EnhancedLectureBot:
         self.fallback_handler
     ))'''
 
+    async def show_helper(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать информацию о помощнике"""
+        text = (
+            f"{self.helper_text}\n\n"
+            "Если вам нужна персональная помощь, свяжитесь с нашим помощником:"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("💬 Написать помощнику", url=f"https://t.me/{self.helper_contact.replace('@', '')}")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
+        ]
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def show_support(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать информацию о техподдержке и перенаправить в канал"""
+        text = (
+            "📞 Техническая поддержка\n\n"
+            f"Если у вас возникли проблемы или вопросы, "
+            f"обратитесь в нашу группу поддержки.\n\n"
+            "Мы поможем вам решить любые проблемы!"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("📞 Перейти в поддержку", url=f"https://t.me/{SUPPORT_GROUP_ID.replace('@', '')}")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
+        ]
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def show_useful_info_safe(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Безопасная версия показа полезной информации"""
+        try:
+            # Проверяем доступность базы данных
+            if not hasattr(self.db, 'get_all_useful_content'):
+                await self.edit_message_with_cleanup(
+                    query, context,
+                    "ℹ️ Полезная информация\n\n"
+                    "❌ Функция временно недоступна. База данных не инициализирована.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
+                    ])
+                )
+                return
+            
+            # Пробуем получить данные
+            useful_content = self.db.get_all_useful_content()
+            
+            if not useful_content:
+                await self.edit_message_with_cleanup(
+                    query, context,
+                    "ℹ️ Полезная информация\n\n"
+                    "Пока нет доступной полезной информации.\n\n"
+                    "💡 Администратор может добавить информацию через админ-панель.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
+                    ])
+                )
+                return
+            
+            # Создаем клавиатуру с контентом
+            keyboard = []
+            for content in useful_content:
+                # Безопасно получаем название папки
+                folder_name = content.get('folder_name', 'Общее')
+                display_name = content['title'][:30] + "..." if len(content['title']) > 30 else content['title']
+                
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"📄 {display_name}", 
+                        callback_data=f"download_useful_{content['id']}"
+                    )
+                ])
+            
+            keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
+            
+            await self.edit_message_with_cleanup(
+                query, context,
+                "ℹ️ Полезная информация\n\n"
+                f"📁 Доступно материалов: {len(useful_content)}\n\n"
+                "Выберите материал для скачивания:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка в show_useful_info_safe: {e}")
+            await self.edit_message_with_cleanup(
+                query, context,
+                "❌ Произошла ошибка при загрузке полезной информации.\n\n"
+                "Попробуйте позже или обратитесь к администратору.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
+                ])
+            )
+            
     async def fallback_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик для любых непонятных сообщений"""
         try:
@@ -3748,7 +4680,7 @@ class EnhancedLectureBot:
 
     async def show_useful_info_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Callback для полезной информации"""
-        await self.show_useful_info_safe(query, context)  # Используем безопасную версию
+        await self.show_useful_info_list_safe(query, context)  # Используем безопасную версию
 
     async def show_support_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Callback для поддержки"""
@@ -3876,6 +4808,25 @@ class EnhancedLectureBot:
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+    async def cleanup_temp_files_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Очистка временных файлов через callback"""
+        await self.edit_message_with_cleanup(
+            query, context,
+            "🧹 Очистка временных файлов...\n\n"
+            "Пожалуйста, подождите."
+        )
+        
+        success, message = await self.code_manager.cleanup_temp_files()
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            message,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
+                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+            ])
+        )
+
     async def start_mass_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Начать массовую загрузку файлов"""
         if query.from_user.id not in ADMIN_IDS:
@@ -3885,8 +4836,8 @@ class EnhancedLectureBot:
         await self.edit_message_with_cleanup(
             query, context,
             "📚 Массовая загрузка файлов\n\n"
-            "✅ Функция активирована!\n\n"
-            "В разработке:\n"
+            "🚧 Эта функция находится в разработке.\n\n"
+            "В будущем здесь будет:\n"
             "• Загрузка нескольких файлов одновременно\n"
             "• Автоматическое распределение по предметам\n"
             "• Пакетная обработка лекций и практических\n\n"
@@ -5261,7 +6212,7 @@ class EnhancedLectureBot:
             f"📝 Название расписания: {title}\n\n"
             "Теперь отправьте файл расписания."
         )
-        
+
 
 async def show_admin_panel(self, query, context: ContextTypes.DEFAULT_TYPE):
     """Показать админ-панель из команды"""
@@ -5577,44 +6528,6 @@ async def show_admin_panel(self, query, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ Произошла ошибка", show_alert=True)
 '''
     
-async def show_system_status(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Показать статус системы"""
-    status = await self.code_manager.get_system_status()
-    
-    if "error" in status:
-        status_text = f"❌ Ошибка получения статуса: {status['error']}"
-    else:
-        system = status.get('system', {})
-        bot = status.get('bot', {})
-        
-        status_text = (
-            "📊 Статус системы\n\n"
-            "🖥️ Система:\n"
-            f"• Платформа: {system.get('platform', 'N/A')}\n"
-            f"• Python: {system.get('python_version', 'N/A').split()[0]}\n"
-            f"• Время работы: {system.get('bot_uptime', 'N/A')}\n"
-            f"• CPU: {system.get('cpu_usage', 'N/A')}%\n"
-            f"• Память: {system.get('memory_usage', 'N/A')}%\n"
-            f"• Диск: {system.get('disk_usage', 'N/A')}%\n"
-            f"• Процессы: {system.get('active_processes', 'N/A')}\n\n"
-            "🤖 Бот:\n"
-            f"• База данных: {bot.get('database_size', 'N/A')}\n"
-            f"• Файлы логов: {bot.get('log_files_count', 'N/A')}\n"
-            f"• Датасеты: {bot.get('training_datasets_count', 'N/A')}\n"
-            f"• Модель ИИ: {bot.get('ai_model_status', 'N/A')}\n\n"
-            f"🕐 {status.get('status', 'N/A')}\n"
-            f"⏰ Обновлено: {status.get('timestamp', '')[:19]}"
-        )
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        status_text,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Обновить статус", callback_data="system_status")],
-            [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
-            [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-        ])
-    )
 
 async def update_code_from_github_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
     """Обновить код из GitHub через callback"""
@@ -5637,18 +6550,6 @@ async def update_code_from_github_callback(self, query, context: ContextTypes.DE
         ])
     )
 
-async def restart_bot_confirmation(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Подтверждение перезапуска бота"""
-    await self.edit_message_with_cleanup(
-        query, context,
-        "⚠️ Подтверждение перезапуска\n\n"
-        "Вы уверены, что хотите перезапустить бота?\n\n"
-        "Бот будет временно недоступен на несколько секунд.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Да, перезапустить", callback_data="confirm_restart")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="code_manager")]
-        ])
-    )
 
 async def start_file_view(self, query, context: ContextTypes.DEFAULT_TYPE):
     """Начать просмотр файлов"""
@@ -5668,181 +6569,6 @@ async def start_file_view(self, query, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-async def confirm_restart(self, query, context):
-    """Подтверждение перезапуска"""
-    success, message = self.code_manager.restart_bot()
-    await self.edit_message_with_cleanup(query, context, message)
-
-async def view_all_datasets(self, query, context):
-    """Показать все датасеты"""
-    datasets = self.ai_assistant.get_datasets_info()
-    
-    if not datasets:
-        await self.edit_message_with_cleanup(
-            query, context,
-            "📚 Все датасеты\n\nНет доступных датасетов.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📤 Загрузить датасет", callback_data="upload_dataset")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")]
-            ])
-        )
-        return
-    
-    message_text = "📚 Все датасеты:\n\n"
-    for i, dataset in enumerate(datasets, 1):
-        message_text += f"{i}. {dataset['filename']} ({dataset['size_mb']} MB)\n"
-    
-    keyboard = []
-    for dataset in datasets:
-        filename = dataset['filename']
-        display_name = filename[:15] + "..." if len(filename) > 15 else filename
-        
-        keyboard.append([
-            InlineKeyboardButton(f"🎯 {display_name}", callback_data=f"train_on_dataset_{filename}"),
-            InlineKeyboardButton(f"🗑️", callback_data=f"delete_dataset_{filename}")
-        ])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="manage_datasets")])
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        message_text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def start_command_execution(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Начать выполнение команды"""
-    context.user_data['state'] = 'executing_command'
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        "⚙️ Выполнение команды\n\n"
-        "Введите команду для выполнения на сервере:\n\n"
-        "Примеры безопасных команд:\n"
-        "• ls -la\n"
-        "• pwd\n"
-        "• python --version\n"
-        "• pip list\n\n"
-        "⚠️ Опасные команды заблокированы\n"
-        "❌ Для отмены используйте /cancel",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Отмена", callback_data="code_manager")]
-        ])
-    )
-
-async def create_system_backup(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Создать бэкап системы"""
-    await self.edit_message_with_cleanup(
-        query, context,
-        "💾 Создание бэкапа системы...\n\n"
-        "Пожалуйста, подождите."
-    )
-    
-    # Исправленный вызов - теперь это асинхронный метод
-    success, message = await self.code_manager.create_backup()
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        message,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 Список бэкапов", callback_data="list_backups")],
-            [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")]
-        ])
-    )
-
-async def list_system_backups(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список бэкапов"""
-    backups = await self.code_manager.list_backups()
-    
-    if not backups:
-        await self.edit_message_with_cleanup(
-            query, context,
-            "📋 Список бэкапов\n\n"
-            "Бэкапы не найдены.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💾 Создать бэкап", callback_data="create_backup")],
-                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")]
-            ])
-        )
-        return
-    
-    backup_text = "📋 Список бэкапов\n\n"
-    for i, backup in enumerate(backups[:10]):  # Показываем первые 10
-        backup_text += f"{i+1}. {backup['name']}\n"
-        backup_text += f"   📅 {backup['timestamp'][:10]} | 💾 {backup['size']}\n\n"
-    
-    if len(backups) > 10:
-        backup_text += f"... и еще {len(backups) - 10} бэкапов\n"
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        backup_text,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💾 Создать бэкап", callback_data="create_backup")],
-            [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")]
-        ])
-    )
-
-async def force_learning_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Callback для принудительного обучения"""
-    await self.force_learning(Update(update_id=0, callback_query=query), context)
-
-async def show_logs_by_type(self, query, context: ContextTypes.DEFAULT_TYPE, log_type: str):
-    """Показать логи по типу с кликабельными кнопками"""
-    # Добавляем проверку прав доступа
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("❌ У вас нет доступа", show_alert=True)
-        return
-    
-    logs = self.db.get_logs(limit=50, level=log_type.upper() if log_type != 'all' else None)
-    
-    if not logs:
-        await self.edit_message_with_cleanup(
-            query, context,
-            f"📋 Логи ({log_type})\n\nНет записей.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
-                [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
-                [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
-                [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-            ])
-        )
-        return
-    
-    # Группируем логи по уровням для статистики
-    error_count = len([log for log in logs if log['level'] == 'ERROR'])
-    warning_count = len([log for log in logs if log['level'] == 'WARNING'])
-    info_count = len([log for log in logs if log['level'] == 'INFO'])
-    
-    logs_text = (
-        f"📋 Логи ({log_type})\n\n"
-        f"❌ Ошибки: {error_count}\n"
-        f"⚠️ Предупреждения: {warning_count}\n"
-        f"ℹ️ Инфо: {info_count}\n\n"
-        "Последние записи:\n"
-    )
-    
-    # Показываем последние 8 записей
-    for i, log in enumerate(logs[:8]):
-        time_str = log['created_at'][11:19]  # Только время
-        level_icon = "❌" if log['level'] == 'ERROR' else "⚠️" if log['level'] == 'WARNING' else "ℹ️"
-        logs_text += f"\n{time_str} {level_icon} {log['message'][:60]}..."
-    
-    if len(logs) > 8:
-        logs_text += f"\n\n... и еще {len(logs) - 8} записей"
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        logs_text,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📋 Все логи", callback_data="view_logs_all")],
-            [InlineKeyboardButton("❌ Ошибки", callback_data="view_logs_error")],
-            [InlineKeyboardButton("⚠️ Предупреждения", callback_data="view_logs_warning")],
-            [InlineKeyboardButton("ℹ️ Инфо", callback_data="view_logs_info")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-        ])
-    )
 
     
 
@@ -6286,23 +7012,7 @@ async def delete_useful_content(self, query, content_id: int, context: ContextTy
             f"❌ Ошибка при удалении контента: {str(e)}"
         )
 
-async def show_helper(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Показать информацию о помощнике"""
-    text = (
-        f"{self.helper_text}\n\n"
-        "Если вам нужна персональная помощь, свяжитесь с нашим помощником:"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("💬 Написать помощнику", url=f"https://t.me/{self.helper_contact.replace('@', '')}")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
-    ]
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+
 
 async def show_support(self, query, context: ContextTypes.DEFAULT_TYPE):
     """Показать информацию о техподдержке и перенаправить в канал"""
