@@ -35,7 +35,8 @@ import subprocess
 import shutil
 import psutil
 from pathlib import Path
-
+from datetime import timedelta
+from enum import Enum
 
 
 
@@ -3760,6 +3761,99 @@ class Database:
         finally:
             conn.close()
 
+class NotificationType(Enum):
+    TECH_BREAK = "Технический перерыв"
+    MEETING = "Совещание"
+    ANNOUNCEMENT = "Объявление"
+    OTHER = "Другое"
+
+class NotificationManager:
+    def __init__(self):
+        self.active_notifications: Dict[int, Dict] = {}
+        self.notification_id_counter = 1
+    
+    async def send_notification_to_all(self, application, message: str, notification_type: NotificationType, delay_minutes: int = 0):
+        """Отправляет уведомление всем пользователям"""
+        notification_id = self.notification_id_counter
+        self.notification_id_counter += 1
+        
+        notification_data = {
+            'id': notification_id,
+            'type': notification_type,
+            'message': message,
+            'timestamp': datetime.now(),
+            'scheduled_time': datetime.now() + timedelta(minutes=delay_minutes) if delay_minutes > 0 else None
+        }
+        
+        self.active_notifications[notification_id] = notification_data
+        
+        # Форматируем сообщение
+        formatted_message = self._format_notification(message, notification_type, delay_minutes)
+        
+        # Отправляем немедленно или с задержкой
+        if delay_minutes > 0:
+            asyncio.create_task(
+                self._send_delayed_notification(application, notification_id, formatted_message, delay_minutes)
+            )
+        else:
+            await self._broadcast_message(application, formatted_message)
+        
+        return notification_id
+    
+    def _format_notification(self, message: str, notification_type: NotificationType, delay_minutes: int) -> str:
+        """Форматирует уведомление"""
+        emoji = {
+            NotificationType.TECH_BREAK: "🔧",
+            NotificationType.MEETING: "📅",
+            NotificationType.ANNOUNCEMENT: "📢",
+            NotificationType.OTHER: "ℹ️"
+        }
+        
+        time_info = ""
+        if delay_minutes > 0:
+            time_info = f"\n⏰ Через {delay_minutes} минут"
+        
+        return (
+            f"{emoji[notification_type]} **{notification_type.value}**\n"
+            f"{message}{time_info}\n"
+            f"_{datetime.now().strftime('%H:%M')}_"
+        )
+    
+    async def _send_delayed_notification(self, application, notification_id: int, message: str, delay_minutes: int):
+        """Отправляет отложенное уведомление"""
+        await asyncio.sleep(delay_minutes * 60)
+        
+        if notification_id in self.active_notifications:
+            await self._broadcast_message(application, message)
+            # Удаляем из активных после отправки
+            del self.active_notifications[notification_id]
+    
+    async def _broadcast_message(self, application, message: str):
+        """Отправляет сообщение всем пользователям"""
+        # Здесь нужно добавить логику получения списка всех пользователей
+        # Пока что просто логируем
+        logger.info(f"Broadcasting message to all users: {message}")
+        
+        # В реальном приложении здесь должен быть код для отправки всем пользователям бота
+        # Например: 
+        # for user_id in all_user_ids:
+        #     try:
+        #         await application.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+        #     except Exception as e:
+        #         logger.error(f"Failed to send message to {user_id}: {e}")
+        
+        print(f"Уведомление для всех: {message}")
+class TeamManager:
+    def __init__(self):
+        self.teams: Dict[str, List[str]] = {}
+        self.user_teams: Dict[str, str] = {}
+        self.notification_manager = NotificationManager()  # Добавить эту строку
+    
+    async def admin_send_notification(self, application, message: str, notification_type: NotificationType, delay_minutes: int = 0):
+        """Метод для администратора для отправки уведомлений"""
+        return await self.notification_manager.send_notification_to_all(
+            application, message, notification_type, delay_minutes
+        )
 # =============================================================================
 # ОБНОВЛЕННЫЙ КЛАСС LectureBot С НОВЫМИ ФУНКЦИЯМИ
 # =============================================================================
@@ -4058,7 +4152,7 @@ class EnhancedLectureBot:
         )
 
         context.user_data['state'] = 'ai_chat'
-        
+
     async def show_lectures_list(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
         """Показать список лекций для предмета"""
         logger.info(f"Показать список лекций для subject_id: {subject_id}")
@@ -5398,13 +5492,13 @@ class EnhancedLectureBot:
         if hasattr(update, 'callback_query') and update.callback_query:
             await self.edit_message_with_cleanup(
                 update.callback_query, context,
-                "🏠 Главное меню\nВыберите действие:",
+                "🏠 Главное меню\nПишите предложения по улучшению в Тех.поддержку\nВыберите действие:",
                 reply_markup=reply_markup
             )
         else:
             await self.send_message_with_cleanup(
                 update, context,
-                "🏠 Главное меню\nВыберите действие:",
+                "🏠 Главное меню\nПишите предложения по улучшению в Тех.поддержку\nВыберите действие:",
                 reply_markup=reply_markup
             )
 
@@ -5415,7 +5509,6 @@ class EnhancedLectureBot:
             "Эта функция находится в разработке.\n\n"
             "В будущем здесь можно будет поддержать развитие бота:\n"
             "• 💰 Пожертвования\n"
-            "• 🌟 Премиум функции\n"
             "• 🚀 Приоритетная поддержка\n\n"
             "Следите за обновлениями!"
         )
@@ -5494,6 +5587,7 @@ class EnhancedLectureBot:
             ])
         )
 
+    
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать админ-панель"""
         if update.effective_user.id not in ADMIN_IDS:
@@ -7136,342 +7230,28 @@ def setup_mass_upload_handlers(application, mass_upload_handler):
             "Теперь отправьте файл расписания."
         )
 
-
-async def show_admin_panel(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Показать админ-панель из команды"""
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("❌ У вас нет доступа", show_alert=True)
-        return
-        
-    keyboard = [
-        [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
-        [InlineKeyboardButton("📤 Одиночная загрузка", callback_data="upload_file")],
-        [InlineKeyboardButton("📚 Массовая загрузка", callback_data="mass_upload")],  # ← ЭТА КНОПКА
-        [InlineKeyboardButton("🗑️ Удаление файлов", callback_data="delete_files")],   # ← И ЭТА
-        [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
-        [InlineKeyboardButton("👨‍🏫 Добавить преподавателя", callback_data="add_teacher")],
-        [InlineKeyboardButton("📅 Управление расписанием", callback_data="manage_schedule")],
-        [InlineKeyboardButton("📦 Управление полезной инфо", callback_data="manage_useful_info")],
-        [InlineKeyboardButton("📋 Просмотр логов", callback_data="view_logs")],
-        [InlineKeyboardButton("🤖 Статистика ИИ", callback_data="ai_stats")],
-        [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
-        [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
-    ]
     
-    await self.edit_message_with_cleanup(
-        query, context,
-        "⚙️ Админ-панель\nВыберите действие:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-'''
-    async def show_ai_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать статистику ИИ"""
-        stats = self.ai_assistant.get_stats()
-        
-        stats_text = (
-            "📊 Статистика ИИ-помощника\n\n"
-            f"🤖 Модель: {stats['current_model']}\n"
-            f"👥 Пользователей: {stats['total_users']}\n"
-            f"💬 Сообщений: {stats['total_messages']}\n"
-            f"⚙️ Статус: {'✅ Активен' if stats['is_configured'] else '❌ Ошибка'}"
-        )
-        
-        keyboard = [
-            [InlineKeyboardButton("📚 Обучить на датасете", callback_data="train_dataset")],
-            [InlineKeyboardButton("🤖 Чат с ИИ", callback_data="ai_assistant")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
-        ]
-        
-        await self.send_message_with_cleanup(
-            update, context,
-            stats_text,
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
 
-    async def start_mass_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать массовую загрузку файлов"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
+    async def update_code_from_github_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Обновить код из GitHub через callback"""
+        await self.edit_message_with_cleanup(
+            query, context,
+            "🔄 Обновление кода из GitHub...\n\n"
+            "Это может занять несколько минут. Пожалуйста, подождите."
+        )
+        
+        # Исправленный вызов - теперь это асинхронный метод
+        success, message = await self.code_manager.update_code_from_github()
         
         await self.edit_message_with_cleanup(
             query, context,
-            "📚 Массовая загрузка файлов\n\n"
-            "✅ Функция активирована!\n\n"
-            "В разработке:\n"
-            "• Загрузка нескольких файлов одновременно\n"
-            "• Автоматическое распределение по предметам\n"
-            "• Пакетная обработка лекций и практических\n\n"
-            "Пока используйте одиночную загрузку:",
+            message,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📤 Одиночная загрузка", callback_data="upload_file")],
+                [InlineKeyboardButton("🔄 Перезапустить", callback_data="restart_bot")] if success else [],
+                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
                 [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
             ])
         )
-
-    async def show_delete_files_menu(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Показать меню удаления файлов"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "🗑️ Удаление файлов\n\n"
-            "Выберите тип файлов для удаления:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📓 Лекции", callback_data="delete_lectures_menu")],
-                [InlineKeyboardButton("📝 Практические", callback_data="delete_practices_menu")],
-                [InlineKeyboardButton("📅 Расписания", callback_data="delete_schedules_menu")],
-                [InlineKeyboardButton("📦 Полезная информация", callback_data="delete_useful_menu")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")]
-            ])
-        )
-
-    
-    async def handle_ai_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка сообщений в AI-чате"""
-        user_message = update.message.text.strip()
-        
-        if not user_message:
-            await self.send_message_with_cleanup(update, context, "Пожалуйста, введите ваш вопрос:")
-            return
-
-        await update.message.chat.send_action(action="typing")
-
-        try:
-            user_id = update.effective_user.id
-            ai_response, success, model_used = await self.ai_assistant.get_ai_response(user_id, user_message)
-
-            if 'ai_conversation' not in context.user_data:
-                context.user_data['ai_conversation'] = []
-
-            context.user_data['ai_conversation'].extend([
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": ai_response}
-            ])
-
-            if len(context.user_data['ai_conversation']) > 10:
-                context.user_data['ai_conversation'] = context.user_data['ai_conversation'][-10:]
-
-            keyboard = [
-                [InlineKeyboardButton("🧹 Очистить историю", callback_data="ai_clear_history")],
-                [InlineKeyboardButton("📊 Статистика ИИ", callback_data="ai_stats")],
-                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
-            ]
-
-            if update.effective_user.id in ADMIN_IDS:
-                keyboard.insert(0, [InlineKeyboardButton("📚 Обучить на датасете", callback_data="train_dataset")])
-
-            await self.send_message_with_cleanup(
-                update, context,
-                f"🤖 {ai_response}",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
-            )
-
-        except Exception as e:
-            logger.error(f"Ошибка в AI чате: {e}")
-            await self.send_message_with_cleanup(
-                update, context,
-                "❌ Произошла ошибка при обработке вашего запроса. Попробуйте позже.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
-                ])
-            )
-
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик нажатий на кнопки с исправленными обработчиками"""
-        query = update.callback_query
-        await query.answer()
-        data = query.data
-        
-        try:
-            logger.info(f"Обработка callback_data: {data}")
-            
-            # Обработка основных кнопок меню
-            if data == "ai_assistant":
-                await self.show_ai_chat(query, context)
-            elif data == "subjects":
-                await self.show_subjects(query, context)
-            elif data == "schedule":
-                await self.show_schedule(query, context)
-            elif data == "helper":
-                await self.show_helper(query, context)
-            elif data == "useful_info":
-                await self.show_useful_info_safe(query, context)
-            elif data == "support":
-                await self.show_support(query, context)
-            elif data == "donate":
-                await self.show_donate_callback(query, context)
-            
-            # Админ-панель и управление
-            elif data == "admin_panel":
-                await self.show_admin_panel(query, context)
-            elif data == "code_manager":
-                await self.code_manager_panel_callback(query, context)
-            elif data == "back_to_menu":
-                await self.show_main_menu(Update(update_id=0, callback_query=query), context)
-            
-            # Управление кодом
-            elif data == "system_status":
-                await self.show_system_status(query, context)
-            elif data == "update_code":
-                await self.update_code_from_github_callback(query, context)
-            elif data == "cleanup_temp":
-                await self.cleanup_temp_files_callback(query, context)
-            elif data == "restart_bot":
-                await self.restart_bot_confirmation(query, context)
-            elif data == "view_files":
-                await self.start_file_view(query, context)
-            elif data == "execute_command":
-                await self.start_command_execution(query, context)
-            elif data == "create_backup":
-                await self.create_system_backup(query, context)
-            elif data == "list_backups":
-                await self.list_system_backups(query, context)
-            elif data == "force_learning":
-                await self.force_learning_callback(query, context)
-            elif data == "confirm_restart":
-                await self.confirm_restart(query, context)
-            
-            # ИИ и обучение
-            elif data == "ai_stats":
-                await self.show_ai_stats_callback(query, context)
-            elif data == "train_dataset":
-                await self.show_dataset_training(query, context)
-            elif data == "upload_dataset":
-                await self.start_upload_dataset(query, context)
-            elif data == "upload_github_dataset":
-                await self.start_upload_github_dataset(query, context)
-            elif data == "manage_datasets":
-                await self.show_manage_datasets(query, context)
-            elif data == "ai_clear_history":
-                await self.clear_ai_history(query, context)
-            elif data == "diagnose_training":
-                await self.diagnose_training(query, context)
-            
-            # Расписание
-            elif data == "manage_schedule":
-                await self.manage_schedule(query, context)
-            elif data == "upload_schedule":
-                await self.start_upload_schedule(query, context)
-            elif data == "view_schedule":
-                await self.show_schedule_list(query, context)
-            
-            # Полезная информация
-            elif data == "manage_useful_info":
-                await self.manage_useful_info_safe(query, context)
-            elif data == "upload_useful_info":
-                await self.start_upload_useful_info_safe(query, context)
-            elif data == "view_useful_info":
-                await self.show_useful_info_list_safe(query, context)
-            
-            # Предметы и преподаватели
-            elif data == "add_subject":
-                await self.start_add_subject(query, context)
-            elif data == "add_teacher":
-                await self.start_add_teacher(query, context)
-            
-            # Загрузка файлов - ДОБАВЛЯЕМ ОБРАБОТЧИКИ
-            elif data == "upload_file":
-                await self.start_single_upload(query, context)
-            elif data == "mass_upload":  # ← ДОБАВЛЕНО
-                await self.start_mass_upload(query, context)
-            elif data == "delete_files":  # ← ДОБАВЛЕНО
-                await self.show_delete_files_menu(query, context)
-            
-            # Логи
-            elif data == "view_logs":
-                await self.show_logs(query, context)
-            
-            # Обработка динамических callback данных
-            elif data.startswith("subject_"):
-                subject_id = int(data.split("_")[1])
-                await self.show_subject_content(query, subject_id, context)
-            elif data.startswith("lecture_"):
-                parts = data.split("_")
-                if len(parts) >= 3:
-                    subject_id = int(parts[1])
-                    lecture_num = int(parts[2])
-                    await self.send_lecture(query, subject_id, lecture_num, context)
-            elif data.startswith("practice_"):
-                parts = data.split("_")
-                if len(parts) >= 3:
-                    subject_id = int(parts[1])
-                    practice_num = int(parts[2])
-                    await self.send_practice(query, subject_id, practice_num, context)
-            elif data.startswith("show_lectures_"):
-                subject_id = int(data.split("_")[2])
-                await self.show_lectures_list(query, subject_id, context)
-            elif data.startswith("show_practices_"):
-                subject_id = int(data.split("_")[2])
-                await self.show_practices_list(query, subject_id, context)
-            elif data.startswith("download_schedule_"):
-                schedule_id = int(data.split("_")[2])
-                await self.send_schedule_file(query, schedule_id, context)
-            elif data.startswith("delete_schedule_"):
-                schedule_id = int(data.split("_")[2])
-                await self.delete_schedule(query, schedule_id, context)
-            elif data.startswith("download_useful_"):
-                content_id = int(data.split("_")[2])
-                await self.send_useful_file(query, content_id, context)
-            elif data.startswith("delete_useful_"):
-                content_id = int(data.split("_")[2])
-                await self.delete_useful_content(query, content_id, context)
-            elif data.startswith("train_on_dataset_"):
-                dataset_name = data.split("_", 3)[-1]
-                await self.start_dataset_training(query, context, dataset_name)
-            elif data.startswith("delete_dataset_"):
-                dataset_name = data.split("_", 2)[-1]
-                await self.delete_dataset(query, context, dataset_name)
-            elif data.startswith("select_subject_"):
-                subject_id = int(data.split("_")[2])
-                await self.handle_select_subject_for_teacher(query, subject_id, context)
-            elif data.startswith("upload_subject_"):
-                subject_id = int(data.split("_")[2])
-                await self.handle_select_upload_subject(query, subject_id, context)
-            elif data.startswith("upload_type_"):
-                upload_type = data.split("_")[2]
-                await self.handle_select_upload_type(query, upload_type, context)
-            elif data.startswith("view_logs_"):
-                log_type = data.split("_")[2]
-                await self.show_logs_by_type(query, context, log_type)
-            elif data == "view_all_datasets":
-                await self.view_all_datasets(query, context)
-            else:
-                logger.warning(f"Неизвестный callback_data: {data}")
-                await query.answer("❌ Команда не распознана", show_alert=True)
-                
-        except (ValueError, IndexError) as e:
-            logger.error(f"Ошибка обработки callback_data '{data}': {e}")
-            await query.answer("❌ Ошибка обработки команды", show_alert=True)
-        except Exception as e:
-            logger.error(f"Неожиданная ошибка в button_handler: {e}")
-            await query.answer("❌ Произошла ошибка", show_alert=True)
-'''
-    
-
-async def update_code_from_github_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Обновить код из GitHub через callback"""
-    await self.edit_message_with_cleanup(
-        query, context,
-        "🔄 Обновление кода из GitHub...\n\n"
-        "Это может занять несколько минут. Пожалуйста, подождите."
-    )
-    
-    # Исправленный вызов - теперь это асинхронный метод
-    success, message = await self.code_manager.update_code_from_github()
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        message,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Перезапустить", callback_data="restart_bot")] if success else [],
-            [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
-            [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-        ])
-    )
 
 
 
@@ -7919,7 +7699,32 @@ async def delete_useful_content(self, query, content_id: int, context: ContextTy
             f"❌ Ошибка при удалении контента: {str(e)}"
         )
 
-
+async def show_admin_panel(self, query, context: ContextTypes.DEFAULT_TYPE):
+    """Показать админ-панель из команды"""
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ У вас нет доступа", show_alert=True)
+        return
+        
+    keyboard = [
+        [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
+        [InlineKeyboardButton("📤 Одиночная загрузка", callback_data="upload_file")],
+        [InlineKeyboardButton("📚 Массовая загрузка", callback_data="mass_upload")],  # ← ЭТА КНОПКА
+        [InlineKeyboardButton("🗑️ Удаление файлов", callback_data="delete_files")],   # ← И ЭТА
+        [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
+        [InlineKeyboardButton("👨‍🏫 Добавить преподавателя", callback_data="add_teacher")],
+        [InlineKeyboardButton("📅 Управление расписанием", callback_data="manage_schedule")],
+        [InlineKeyboardButton("📦 Управление полезной инфо", callback_data="manage_useful_info")],
+        [InlineKeyboardButton("📋 Просмотр логов", callback_data="view_logs")],
+        [InlineKeyboardButton("🤖 Статистика ИИ", callback_data="ai_stats")],
+        [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
+        [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
+    ]
+    
+    await self.edit_message_with_cleanup(
+        query, context,
+        "⚙️ Админ-панель\nВыберите действие:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def show_support(self, query, context: ContextTypes.DEFAULT_TYPE):
     """Показать информацию о техподдержке и перенаправить в канал"""
