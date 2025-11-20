@@ -3244,6 +3244,42 @@ class EnhancedLectureBot:
             # Просто показываем меню в случае ошибки
             await self.show_main_menu(update, context)
 
+    # =============================================================================
+    # БЕЗОПАСНЫЕ МЕТОДЫ ДЛЯ УПРАВЛЕНИЯ ПОЛЕЗНОЙ ИНФОРМАЦИЕЙ
+    # =============================================================================
+
+    async def manage_useful_info_safe(self, query, context):
+        """Безопасная версия manage_useful_info"""
+        try:
+            if hasattr(self.db, 'get_all_useful_content'):
+                await self.manage_useful_info(query, context)
+            else:
+                await query.edit_message_text("❌ Функция управления полезной информацией временно недоступна")
+        except Exception as e:
+            logger.error(f"Ошибка в manage_useful_info_safe: {e}")
+            await query.edit_message_text("❌ Ошибка при управлении полезной информацией")
+
+    async def start_upload_useful_info_safe(self, query, context):
+        """Безопасная версия start_upload_useful_info"""
+        try:
+            if hasattr(self.db, 'add_useful_content'):
+                await self.start_upload_useful_info(query, context)
+            else:
+                await query.edit_message_text("❌ Функция загрузки полезной информации временно недоступна")
+        except Exception as e:
+            logger.error(f"Ошибка в start_upload_useful_info_safe: {e}")
+            await query.edit_message_text("❌ Ошибка при загрузке полезной информации")
+
+    async def show_useful_info_list_safe(self, query, context):
+        """Безопасная версия show_useful_info_list"""
+        try:
+            if hasattr(self.db, 'get_all_useful_content'):
+                await self.show_useful_info_list(query, context)
+            else:
+                await query.edit_message_text("❌ Функция просмотра полезной информации временно недоступна")
+        except Exception as e:
+            logger.error(f"Ошибка в show_useful_info_list_safe: {e}")
+            await query.edit_message_text("❌ Ошибка при получении полезной информации")
 
     async def cleanup_previous_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Удаление предыдущих сообщений бота"""
@@ -3340,16 +3376,16 @@ class EnhancedLectureBot:
             [InlineKeyboardButton("ℹ️ Полезная информация", callback_data="useful_info")],
             [InlineKeyboardButton("👤 Ваш помощник", callback_data="helper")],
             [InlineKeyboardButton("📞 Техподдержка", callback_data="support")],
-            [InlineKeyboardButton("💝 Пожертвования (в разработке)", callback_data="donate")],  # Новая кнопка
+            [InlineKeyboardButton("💝 Пожертвования", callback_data="donate")],
         ]
         
         if update.effective_user.id in ADMIN_IDS:
             keyboard.append([InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")])
-            keyboard.append([InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")])  # Новая кнопка
+            keyboard.append([InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if update.callback_query:
+        if hasattr(update, 'callback_query') and update.callback_query:
             await self.edit_message_with_cleanup(
                 update.callback_query, context,
                 "🏠 Главное меню\nВыберите действие:",
@@ -3588,21 +3624,45 @@ class EnhancedLectureBot:
             )
 
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработчик нажатий на кнопки с новыми функциями"""
+        """Обработчик нажатий на кнопки с исправленными обработчиками"""
         query = update.callback_query
         await query.answer()
         data = query.data
         
         try:
-            # Обработка новых callback данных
-            if data == "donate":
+            logger.info(f"Обработка callback_data: {data}")
+            
+            # Обработка основных кнопок меню
+            if data == "ai_assistant":
+                await self.show_ai_chat(query, context)
+            elif data == "subjects":
+                await self.show_subjects(query, context)
+            elif data == "schedule":
+                await self.show_schedule(query, context)
+            elif data == "helper":
+                await self.show_helper(query, context)
+            elif data == "useful_info":
+                await self.show_useful_info_safe(query, context)  # Используем безопасную версию
+            elif data == "support":
+                await self.show_support(query, context)
+            elif data == "donate":
                 await self.show_donate_callback(query, context)
+            
+            # Админ-панель и управление
+            elif data == "admin_panel":
+                await self.show_admin_panel(query, context)
             elif data == "code_manager":
                 await self.code_manager_panel_callback(query, context)
+            elif data == "back_to_menu":
+                await self.show_main_menu(Update(update_id=0, callback_query=query), context)
+            
+            # Управление кодом
             elif data == "system_status":
                 await self.show_system_status(query, context)
             elif data == "update_code":
                 await self.update_code_from_github_callback(query, context)
+            elif data == "cleanup_temp":
+                await self.cleanup_temp_files_callback(query, context)
             elif data == "restart_bot":
                 await self.restart_bot_confirmation(query, context)
             elif data == "view_files":
@@ -3617,26 +3677,8 @@ class EnhancedLectureBot:
                 await self.force_learning_callback(query, context)
             elif data == "confirm_restart":
                 await self.confirm_restart(query, context)
-            elif data == "cleanup_temp":
-                await self.cleanup_temp_files_callback(query, context)
-            elif data == "diagnose_training":
-                await self.diagnose_training(query, context)
-            elif data == "ai_assistant":
-                await self.show_ai_chat(query, context)
-            elif data == "subjects":
-                await self.show_subjects(query, context)
-            elif data == "schedule":
-                await self.show_schedule(query, context)
-            elif data == "helper":
-                await self.show_helper(query, context)
-            elif data == "useful_info":
-                await self.show_useful_info(query, context)
-            elif data == "support":
-                await self.show_support(query, context)
-            elif data == "admin_panel":
-                await self.show_admin_panel(query, context)
-            elif data == "back_to_menu":
-                await self.show_main_menu(update, context)
+            
+            # ИИ и обучение
             elif data == "ai_stats":
                 await self.show_ai_stats_callback(query, context)
             elif data == "train_dataset":
@@ -3649,24 +3691,40 @@ class EnhancedLectureBot:
                 await self.show_manage_datasets(query, context)
             elif data == "ai_clear_history":
                 await self.clear_ai_history(query, context)
+            elif data == "diagnose_training":
+                await self.diagnose_training(query, context)
+            
+            # Расписание
             elif data == "manage_schedule":
                 await self.manage_schedule(query, context)
             elif data == "upload_schedule":
                 await self.start_upload_schedule(query, context)
             elif data == "view_schedule":
                 await self.show_schedule_list(query, context)
-            elif data.startswith("download_schedule_"):
-                schedule_id = int(data.split("_")[2])
-                await self.send_schedule_file(query, schedule_id, context)
-            elif data.startswith("delete_schedule_"):
-                schedule_id = int(data.split("_")[2])
-                await self.delete_schedule(query, schedule_id, context)
-            elif data.startswith("train_on_dataset_"):
-                dataset_name = data.split("_", 3)[-1]
-                await self.start_dataset_training(query, context, dataset_name)
-            elif data.startswith("delete_dataset_"):
-                dataset_name = data.split("_", 2)[-1]
-                await self.delete_dataset(query, context, dataset_name)
+            
+            # Полезная информация
+            elif data == "manage_useful_info":
+                await self.manage_useful_info_safe(query, context)  # Используем безопасную версию
+            elif data == "upload_useful_info":
+                await self.start_upload_useful_info_safe(query, context)  # Используем безопасную версию
+            elif data == "view_useful_info":
+                await self.show_useful_info_list_safe(query, context)  # Используем безопасную версию
+            
+            # Предметы и преподаватели
+            elif data == "add_subject":
+                await self.start_add_subject(query, context)
+            elif data == "add_teacher":
+                await self.start_add_teacher(query, context)
+            
+            # Загрузка файлов
+            elif data == "upload_file":
+                await self.start_single_upload(query, context)
+            
+            # Логи
+            elif data == "view_logs":
+                await self.show_logs(query, context)
+            
+            # Обработка динамических callback данных
             elif data.startswith("subject_"):
                 subject_id = int(data.split("_")[1])
                 await self.show_subject_content(query, subject_id, context)
@@ -3688,31 +3746,27 @@ class EnhancedLectureBot:
             elif data.startswith("show_practices_"):
                 subject_id = int(data.split("_")[2])
                 await self.show_practices_list(query, subject_id, context)
-            elif data == "view_logs":
-                await self.show_logs(query, context)
-            elif data == "manage_useful_info":
-                await self.manage_useful_info(query, context)
-            elif data == "upload_useful_info":
-                await self.start_upload_useful_info(query, context)
-            elif data == "view_useful_info":
-                await self.show_useful_info_list(query, context)
+            elif data.startswith("download_schedule_"):
+                schedule_id = int(data.split("_")[2])
+                await self.send_schedule_file(query, schedule_id, context)
+            elif data.startswith("delete_schedule_"):
+                schedule_id = int(data.split("_")[2])
+                await self.delete_schedule(query, schedule_id, context)
             elif data.startswith("download_useful_"):
                 content_id = int(data.split("_")[2])
                 await self.send_useful_file(query, content_id, context)
             elif data.startswith("delete_useful_"):
                 content_id = int(data.split("_")[2])
                 await self.delete_useful_content(query, content_id, context)
-            elif data == "view_all_datasets":
-                await self.view_all_datasets(query, context)
-            elif data == "add_subject":
-                await self.start_add_subject(query, context)
-            elif data == "add_teacher":
-                await self.start_add_teacher(query, context)
+            elif data.startswith("train_on_dataset_"):
+                dataset_name = data.split("_", 3)[-1]
+                await self.start_dataset_training(query, context, dataset_name)
+            elif data.startswith("delete_dataset_"):
+                dataset_name = data.split("_", 2)[-1]
+                await self.delete_dataset(query, context, dataset_name)
             elif data.startswith("select_subject_"):
                 subject_id = int(data.split("_")[2])
                 await self.handle_select_subject_for_teacher(query, subject_id, context)
-            elif data == "upload_file":
-                await self.start_single_upload(query, context)
             elif data.startswith("upload_subject_"):
                 subject_id = int(data.split("_")[2])
                 await self.handle_select_upload_subject(query, subject_id, context)
@@ -3722,11 +3776,11 @@ class EnhancedLectureBot:
             elif data.startswith("view_logs_"):
                 log_type = data.split("_")[2]
                 await self.show_logs_by_type(query, context, log_type)
+            elif data == "view_all_datasets":
+                await self.view_all_datasets(query, context)
             else:
-                # НЕИЗВЕСТНЫЕ КОМАНДЫ - просто показываем alert и НЕ переходим в меню
                 logger.warning(f"Неизвестный callback_data: {data}")
                 await query.answer("❌ Команда не распознана", show_alert=True)
-                return  # Выходим без перехода в меню
                 
         except (ValueError, IndexError) as e:
             logger.error(f"Ошибка обработки callback_data '{data}': {e}")
@@ -3734,28 +3788,94 @@ class EnhancedLectureBot:
         except Exception as e:
             logger.error(f"Неожиданная ошибка в button_handler: {e}")
             await query.answer("❌ Произошла ошибка", show_alert=True)
-            
-                
-    async def cleanup_temp_files_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Очистка временных файлов через callback"""
-        await self.edit_message_with_cleanup(
-            query, context,
-            "🧹 Очистка временных файлов...\n\n"
-            "Удаляем временные директории и файлы..."
-        )
-        
-        # Исправленный вызов - теперь это асинхронный метод
-        success, message = await self.code_manager.cleanup_temp_files()
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            message,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔧 Управление кодом", callback_data="code_manager")],
-                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-            ])
-        )
 
+    # =============================================================================
+    # ДОБАВЛЕННЫЕ CALLBACK ОБРАБОТЧИКИ
+    # =============================================================================
+
+    async def show_admin_panel_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для админ-панели"""
+        await self.show_admin_panel(query, context)
+
+    async def show_subjects_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для предметов"""
+        await self.show_subjects(query, context)
+
+    async def show_schedule_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для расписания"""
+        await self.show_schedule(query, context)
+
+    async def show_helper_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для помощника"""
+        await self.show_helper(query, context)
+
+    async def show_useful_info_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для полезной информации"""
+        await self.show_useful_info_safe(query, context)  # Используем безопасную версию
+
+    async def show_support_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для поддержки"""
+        await self.show_support(query, context)
+
+    async def back_to_menu_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для возврата в меню"""
+        await self.show_main_menu(Update(update_id=0, callback_query=query), context)
+
+    async def train_dataset_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для обучения на датасете"""
+        await self.show_dataset_training(query, context)
+
+    async def upload_dataset_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для загрузки датасета"""
+        await self.start_upload_dataset(query, context)
+
+    async def upload_github_dataset_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для загрузки датасета с GitHub"""
+        await self.start_upload_github_dataset(query, context)
+
+    async def manage_datasets_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для управления датасетами"""
+        await self.show_manage_datasets(query, context)
+
+    async def view_logs_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для просмотра логов"""
+        await self.show_logs(query, context)
+
+    async def manage_useful_info_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для управления полезной информацией"""
+        await self.manage_useful_info_safe(query, context)  # Используем безопасную версию
+
+    async def upload_useful_info_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для загрузки полезной информации"""
+        await self.start_upload_useful_info_safe(query, context)  # Используем безопасную версию
+
+    async def view_useful_info_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для просмотра полезной информации"""
+        await self.show_useful_info_list_safe(query, context)  # Используем безопасную версию
+
+    async def add_subject_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для добавления предмета"""
+        await self.start_add_subject(query, context)
+
+    async def add_teacher_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для добавления преподавателя"""
+        await self.start_add_teacher(query, context)
+
+    async def upload_file_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для одиночной загрузки"""
+        await self.start_single_upload(query, context)
+
+    async def manage_schedule_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для управления расписанием"""
+        await self.manage_schedule(query, context)
+
+    async def upload_schedule_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для загрузки расписания"""
+        await self.start_upload_schedule(query, context)
+
+    async def view_schedule_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Callback для просмотра расписания"""
+        await self.show_schedule_list(query, context)
 
     async def show_donate_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Callback для кнопки пожертвований"""
@@ -3825,7 +3945,6 @@ class EnhancedLectureBot:
             ])
         )
 
-
     async def restart_bot_confirmation(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Подтверждение перезапуска бота"""
         await self.edit_message_with_cleanup(
@@ -3856,6 +3975,7 @@ class EnhancedLectureBot:
                 [InlineKeyboardButton("❌ Отмена", callback_data="code_manager")]
             ])
         )
+
     async def confirm_restart(self, query, context):
         """Подтверждение перезапуска"""
         success, message = self.code_manager.restart_bot()
@@ -3897,7 +4017,6 @@ class EnhancedLectureBot:
             message_text,
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
 
     async def start_command_execution(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Начать выполнение команды"""
@@ -3978,10 +4097,11 @@ class EnhancedLectureBot:
 
     async def show_logs_by_type(self, query, context: ContextTypes.DEFAULT_TYPE, log_type: str):
         """Показать логи по типу с кликабельными кнопками"""
-    # Добавляем проверку прав доступа
+        # Добавляем проверку прав доступа
         if query.from_user.id not in ADMIN_IDS:
             await query.answer("❌ У вас нет доступа", show_alert=True)
             return
+        
         logs = self.db.get_logs(limit=50, level=log_type.upper() if log_type != 'all' else None)
         
         if not logs:
@@ -4040,15 +4160,13 @@ class EnhancedLectureBot:
         logger.info(f"Обработка текстового сообщения: состояние={user_state}, сообщение={user_message}")
         
         try:
-            # Обработка новых состояний
-            if user_state == 'viewing_file':
+            # Обработка состояний
+            if user_state == 'ai_chat':
+                await self.handle_ai_message(update, context)
+            elif user_state == 'viewing_file':
                 await self.handle_file_viewing(update, context, user_message)
             elif user_state == 'executing_command':
                 await self.handle_command_execution(update, context, user_message)
-            elif user_state == 'confirm_restart':
-                await self.handle_restart_confirmation(update, context, user_message)
-            elif user_state == 'ai_chat':
-                await self.handle_ai_message(update, context)
             elif user_state == 'adding_subject':
                 await self.handle_add_subject(update, context, user_message)
             elif user_state == 'adding_teacher_name':
@@ -5149,7 +5267,6 @@ class EnhancedLectureBot:
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-
     async def handle_select_upload_type(self, query, upload_type: str, context: ContextTypes.DEFAULT_TYPE):
         """Обработка выбора типа файла для загрузки"""
         context.user_data['upload_type'] = upload_type
@@ -5274,7 +5391,6 @@ class EnhancedLectureBot:
             )
         
         context.user_data.clear()
-
 
     async def start_upload_schedule(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Начать загрузку расписания"""
@@ -5819,8 +5935,13 @@ class EnhancedLectureBot:
     async def cancel_operation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отмена любой операции"""
         context.user_data.clear()
-        await self.send_message_with_cleanup(update, context, "❌ Операция отменена")
-        await self.show_main_menu(update, context)
+        await self.send_message_with_cleanup(
+            update, context, 
+            "❌ Операция отменена",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_menu")]
+            ])
+        )
 
     def run_bot(self):
         """Запуск бота"""
