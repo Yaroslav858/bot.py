@@ -8,8 +8,6 @@ import requests
 import asyncio
 import json
 import numpy as np
-from aiogram import Bot, Dispatcher, types
-from aiogram.fsm.storage.memory import MemoryStorage
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -31,6 +29,7 @@ from telegram.ext import (
     Application, CommandHandler, ConversationHandler, CallbackQueryHandler, 
     MessageHandler, filters, ContextTypes
 )
+import xml.etree.ElementTree as ET
 import subprocess
 import shutil
 import psutil
@@ -118,7 +117,134 @@ class BotCodeManager:
         self.bot_instance = bot_instance
         self.backup_dir = "backups"
         os.makedirs(self.backup_dir, exist_ok=True)
+    
+    async def update_code_from_github(self, repo_url: str = None, branch: str = "main") -> Tuple[bool, str]:
+        """Асинхронная версия обновления кода из GitHub с улучшенной обработкой ошибок"""
+        try:
+            if not repo_url:
+                repo_url = "https://github.com/Yaroslav858/bot.py.git"  
+            
+            temp_dir = "temp_update"
+            
+            # УЛУЧШЕННАЯ ОЧИСТКА: проверяем и полностью удаляем существующую директорию
+            if os.path.exists(temp_dir):
+                logger.info(f"Удаляем существующую директорию {temp_dir}")
+                try:
+                    # Рекурсивно удаляем всю директорию
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    
+                    # Дополнительная проверка что директория удалена
+                    if os.path.exists(temp_dir):
+                        # Если не удалось удалить, пробуем другой подход
+                        import subprocess
+                        if os.name == 'nt':  # Windows
+                            subprocess.run(f'rmdir /s /q "{temp_dir}"', shell=True, capture_output=True)
+                        else:  # Linux/Mac
+                            subprocess.run(f'rm -rf "{temp_dir}"', shell=True, capture_output=True)
+                        
+                        # Ждем немного и проверяем снова
+                        await asyncio.sleep(2)
+                        
+                        if os.path.exists(temp_dir):
+                            return False, f"❌ Не удалось удалить существующую директорию {temp_dir}"
+                            
+                except Exception as e:
+                    logger.error(f"Ошибка удаления директории {temp_dir}: {e}")
+                    return False, f"❌ Ошибка удаления временной директории: {str(e)}"
+    
+            # Ждем немного чтобы система освободила ресурсы
+            await asyncio.sleep(1)
+            
+            # Проверяем что директории действительно нет
+            if os.path.exists(temp_dir):
+                return False, f"❌ Директория {temp_dir} все еще существует после удаления"
+            
+            # Клонируем репозиторий
+            logger.info(f"Клонируем репозиторий {repo_url} ветка {branch}")
+            process = await asyncio.create_subprocess_exec(
+                "git", "clone", "-b", branch, "--depth", "1", repo_url, temp_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                error_msg = stderr.decode() if stderr else stdout.decode()
+                logger.error(f"Ошибка клонирования: {error_msg}")
+                
+                # Очищаем директорию в случае ошибки
+                if os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except:
+                        pass
+                
+                return False, f"❌ Ошибка клонирования: {error_msg}"
+            
+            # Создаем бэкап текущего кода
+            backup_success, backup_msg = await self.create_backup()
+            if not backup_success:
+                # Очищаем временную директорию
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                return False, f"❌ Не удалось создать бэкап: {backup_msg}"
+            
+            # Копируем новые файлы (исключая конфигурационные)
+            exclude_files = {'bot_database.db', 'self_learning_model.pth', 'config.json', 'training_datasets', 'backups', 'user_dialogues'}
+            
+            copied_files = []
+            for item in os.listdir(temp_dir):
+                if item in exclude_files or item.startswith('.'):
+                    continue
+                    
+                src_path = os.path.join(temp_dir, item)
+                dst_path = os.path.join('.', item)
+                
+                try:
+                    if os.path.isdir(src_path):
+                        if os.path.exists(dst_path):
+                            logger.info(f"Удаляем существующую директорию {dst_path}")
+                            shutil.rmtree(dst_path, ignore_errors=True)
+                        logger.info(f"Копируем директорию {item}")
+                        shutil.copytree(src_path, dst_path)
+                    else:
+                        logger.info(f"Копируем файл {item}")
+                        shutil.copy2(src_path, dst_path)
+                    
+                    copied_files.append(item)
+                    
+                except Exception as e:
+                    logger.error(f"Ошибка копирования {item}: {e}")
+                    # Продолжаем копирование других файлов
+            
+            logger.info(f"Скопировано файлов: {len(copied_files)}")
+            
+            # Очищаем временную директорию
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"Не удалось очистить временную директорию: {e}")
+            
+            if copied_files:
+                return True, f"✅ Код успешно обновлен из GitHub. Скопировано файлов: {len(copied_files)}. Требуется перезагрузция."
+            else:
+                return False, "❌ Не удалось скопировать ни одного файла"
         
+        except Exception as e:
+            logger.error(f"Ошибка обновления кода: {e}")
+            # Гарантированная очистка временной директории
+            if os.path.exists("temp_update"):
+                try:
+                    shutil.rmtree("temp_update", ignore_errors=True)
+                except:
+                    pass
+            return False, f"❌ Ошибка обновления: {str(e)}"
+
+
+
     async def get_system_status(self) -> Dict[str, Any]:
         """Получить статус системы"""
         try:
@@ -644,12 +770,9 @@ class AdvancedDatasetLoader:
         self.supported_formats = {
             'json': ['.json', '.jsonl', '.ndjson'],
             'csv': ['.csv', '.tsv', '.txt'],
-            'excel': ['.xlsx', '.xls', '.xlsm'],
             'text': ['.txt', '.text', '.md'],
             'yaml': ['.yaml', '.yml'],
             'xml': ['.xml'],
-            'parquet': ['.parquet'],
-            'feather': ['.feather'],
             'pickle': ['.pkl', '.pickle']
         }
     
@@ -945,46 +1068,60 @@ class AdvancedDatasetLoader:
                 self._extract_from_item(subitem, texts, labels)
     
     def _load_csv_dataset(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Загрузка CSV/TSV датасета"""
+        """Загрузка CSV/TSV датасета без pandas"""
         try:
+            texts = []
+            labels = []
+            
             # Автоопределение разделителя
             with open(filepath, 'r', encoding='utf-8') as f:
                 first_line = f.readline()
                 delimiter = ',' if ',' in first_line else '\t' if '\t' in first_line else ','
             
-            df = pd.read_csv(filepath, delimiter=delimiter, encoding='utf-8')
-            
-            texts = []
-            labels = []
+            with open(filepath, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+                
+            if not lines:
+                return np.array([]), np.array([])
+                
+            # Предполагаем, что первая строка - заголовок
+            header = lines[0].strip().split(delimiter)
+            data_lines = lines[1:]
             
             # Поиск колонок с текстом и метками
             text_columns = ['text', 'content', 'question', 'input', 'sentence', 'message', 'title', 'body']
             label_columns = ['label', 'category', 'class', 'target', 'sentiment', 'tags', 'type']
             
-            text_col = None
-            label_col = None
+            text_col_idx = None
+            label_col_idx = None
             
-            for col in df.columns:
+            for i, col in enumerate(header):
                 col_lower = str(col).lower()
                 if any(tc in col_lower for tc in text_columns):
-                    text_col = col
+                    text_col_idx = i
                 elif any(lc in col_lower for lc in label_columns):
-                    label_col = col
+                    label_col_idx = i
             
             # Если не нашли стандартные колонки, используем первую для текста и вторую для меток
-            if text_col is None and len(df.columns) > 0:
-                text_col = df.columns[0]
-            if label_col is None and len(df.columns) > 1:
-                label_col = df.columns[1]
+            if text_col_idx is None and len(header) > 0:
+                text_col_idx = 0
+            if label_col_idx is None and len(header) > 1:
+                label_col_idx = 1
             
-            if text_col is not None:
-                for _, row in df.iterrows():
-                    text = str(row[text_col]) if pd.notna(row[text_col]) else ""
-                    label = str(row[label_col]) if label_col and pd.notna(row.get(label_col, '')) else "unknown"
+            for line in data_lines:
+                if not line.strip():
+                    continue
                     
-                    if text.strip():
-                        texts.append(text)
-                        labels.append(label)
+                values = line.strip().split(delimiter)
+                if len(values) <= max(text_col_idx or 0, label_col_idx or 0):
+                    continue
+                    
+                text = values[text_col_idx] if text_col_idx is not None else ""
+                label = values[label_col_idx] if label_col_idx is not None else "unknown"
+                
+                if text and text.strip():
+                    texts.append(text.strip())
+                    labels.append(label)
             
             return self._prepare_data(texts, labels)
             
@@ -2008,7 +2145,7 @@ class SelfLearningAI:
             file_extension = os.path.splitext(filepath)[1].lower()
             
             if file_extension in ['.csv', '.txt', '.tsv']:
-                # Для CSV файлов используем pandas с chunking
+                # Для CSV файлов используем простую обработку
                 return self._load_large_csv(filepath)
             elif file_extension in ['.json', '.jsonl']:
                 # Для JSON файлов используем потоковую загрузку
@@ -2203,41 +2340,75 @@ class SelfLearningAI:
 # =============================================================================
 
 class EnhancedSelfLearningAI(SelfLearningAI):
-    """Улучшенный SelfLearningAI с самообучением из диалогов пользователей"""
-    
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.dialogue_storage = "user_dialogues"
-        os.makedirs(self.dialogue_storage, exist_ok=True)
-        self.learning_from_dialogues = True
-        self.min_dialogue_length = 3  # Минимальная длина диалога для обучения
-        self.learning_batch_size = 10  # Размер батча для обучения из диалогов
-        
-    def save_user_dialogue(self, user_id: int, messages: List[Dict[str, str]]):
-        """Сохранить диалог пользователя для обучения"""
+    async def learn_from_user_dialogues(self, user_id: int = None):
+        """Самообучение из сохраненных диалогов пользователей"""
         try:
-            if len(messages) < self.min_dialogue_length:
-                return
+            if not self.learning_from_dialogues:
+                return False, "Обучение из диалогов отключено"
+            
+            # Собираем все диалоги
+            all_dialogues = []
+            for filename in os.listdir(self.dialogue_storage):
+                if filename.endswith('.jsonl'):
+                    filepath = os.path.join(self.dialogue_storage, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            for line in f:
+                                if line.strip():
+                                    dialogue = json.loads(line.strip())
+                                    if user_id is None or dialogue.get('user_id') == user_id:
+                                        all_dialogues.append(dialogue)
+                    except Exception as e:
+                        logger.error(f"Ошибка чтения файла диалога {filename}: {e}")
+            
+            if len(all_dialogues) < self.min_dialogue_length:
+                return False, f"Недостаточно данных для обучения. Нужно минимум {self.min_dialogue_length} сообщений"
+            
+            # Группируем диалоги по пользователям и сессиям
+            training_data = self._prepare_dialogue_training_data(all_dialogues)
+            
+            if not training_data:
+                return False, "Не удалось подготовить данные для обучения"
+            
+            # Обучаем модель - ИСПРАВЛЕННЫЙ ВЫЗОВ
+            # Вместо прямого вызова _train_on_dialogues используем learn_from_data
+            if training_data:
+                # Преобразуем данные в формат для обучения
+                texts = [pair[0] for pair in training_data]
+                targets = [pair[1] for pair in training_data]
                 
-            dialogue_file = os.path.join(self.dialogue_storage, f"user_{user_id}.jsonl")
+                # Векторизуем тексты
+                if hasattr(self, 'vectorizer'):
+                    X = self.vectorizer.transform(texts)
+                else:
+                    # Создаем простой векторзатор если нет
+                    self.vectorizer = SimpleTextVectorizer(max_features=1000)
+                    X = self.vectorizer.fit_transform(texts)
+                
+                # Преобразуем цели в числовой формат
+                unique_targets = list(set(targets))
+                target_to_idx = {target: idx for idx, target in enumerate(unique_targets)}
+                y = np.array([target_to_idx[target] for target in targets])
+                
+                # Обучаем модель
+                if len(X) > 0 and len(y) > 0:
+                    losses = self.learn_from_data(X, y, epochs=3, batch_size=8)
+                    success = losses is not None and len(losses) > 0
+                else:
+                    success = False
+            else:
+                success = False
             
-            # Сохраняем только последние N сообщений чтобы избежать переполнения
-            recent_messages = messages[-20:]  # Последние 20 сообщений
-            
-            with open(dialogue_file, 'a', encoding='utf-8') as f:
-                for msg in recent_messages:
-                    if msg.get('role') and msg.get('content'):
-                        f.write(json.dumps({
-                            'user_id': user_id,
-                            'role': msg['role'],
-                            'content': msg['content'],
-                            'timestamp': datetime.now().isoformat()
-                        }, ensure_ascii=False) + '\n')
-                        
-            logger.info(f"Сохранен диалог пользователя {user_id}, сообщений: {len(recent_messages)}")
-            
+            if success:
+                # Очищаем старые диалоги после успешного обучения
+                self._cleanup_old_dialogues()
+                return True, f"✅ Самообучение завершено! Обработано {len(training_data)} диалогов"
+            else:
+                return False, "❌ Ошибка при обучении на диалогах"
+                
         except Exception as e:
-            logger.error(f"Ошибка сохранения диалога: {e}")
+            logger.error(f"Ошибка самообучения из диалогов: {e}")
+            return False, f"❌ Ошибка самообучения: {str(e)}"
     
     async def learn_from_user_dialogues(self, user_id: int = None):
         """Самообучение из сохраненных диалогов пользователей"""
@@ -2321,57 +2492,286 @@ class EnhancedSelfLearningAI(SelfLearningAI):
         
         return training_pairs
     
-    def _train_on_dialogues(self, training_pairs: List[Tuple[str, str]]) -> bool:
-        """Обучение на парах вопрос-ответ из диалогов"""
+    async def _train_on_dialogues(self, update: Update, context: ContextTypes.DEFAULT_TYPE, dataset_name: str = None):
+        """Обучение модели на диалогах с исправленной обработкой данных"""
         try:
-            if not training_pairs:
-                return False
+            query = update.callback_query
+            if query:
+                await query.answer()
+                message = query.message
+            else:
+                message = update.message
+
+            # Показываем сообщение о начале обучения
+            status_message = await message.reply_text("🔄 Начинаю обучение на диалогах...")
+
+            # Загружаем датасет
+            dataset_path = os.path.join('training_data', dataset_name) if dataset_name else 'training_data/dialogs'
             
-            # Подготавливаем данные
-            questions = [pair[0] for pair in training_pairs]
-            answers = [pair[1] for pair in training_pairs]
+            if not os.path.exists(dataset_path):
+                await status_message.edit_text("❌ Датасет диалогов не найден")
+                return
+
+            # Загружаем и предобрабатываем данные
+            dialogs = await self.load_and_preprocess_dialogs(dataset_path)
             
-            # Векторизация
-            vectorizer = SimpleTextVectorizer(max_features=1000)
-            X = vectorizer.fit_transform(questions)
-            
-            # Для ответов используем ту же векторзацию или создаем отдельную
-            y_vectorizer = SimpleTextVectorizer(max_features=1000)
-            y = y_vectorizer.fit_transform(answers)
-            
-            # Проверяем размерности
-            if X.shape[0] == 0 or y.shape[0] == 0:
-                return False
-            
+            if not dialogs:
+                await status_message.edit_text("❌ Не удалось загрузить диалоги")
+                return
+
+            await status_message.edit_text(f"📊 Загружено {len(dialogs)} диалогов. Начинаю обучение...")
+
+            # Создаем модель если нужно
+            if not hasattr(self, 'dialog_model'):
+                self.dialog_model = await self.create_dialog_model()
+
             # Обучаем модель
-            losses = self.learn_from_data(X, y, epochs=3, batch_size=min(8, len(X)))
-            
-            if losses:
-                self.save_model()
-                logger.info(f"Самообучение завершено. Обработано {len(training_pairs)} пар")
-                return True
-            
-            return False
-            
+            success = await self.train_dialog_model(dialogs, status_message)
+
+            if success:
+                await status_message.edit_text(
+                    "✅ Обучение на диалогах завершено успешно!\n"
+                    f"• Обучено диалогов: {len(dialogs)}\n"
+                    f"• Модель готова к использованию",
+                    parse_mode='Markdown'
+                )
+            else:
+                await status_message.edit_text("❌ Обучение не удалось")
+
         except Exception as e:
             logger.error(f"Ошибка обучения на диалогах: {e}")
-            return False
-    
-    def _cleanup_old_dialogues(self, days_old: int = 7):
-        """Очистка старых диалогов"""
+            error_msg = f"❌ Ошибка обучения: {str(e)}"
+            if "multi-target not supported" in str(e):
+                error_msg += "\n\n🔧 Проблема: неверный формат данных обучения"
+            await message.reply_text(error_msg)
+
+    async def load_and_preprocess_dialogs(self, dataset_path: str) -> list:
+        """Загрузка и предобработка диалогов"""
+        dialogs = []
+        
         try:
-            cutoff_date = datetime.now().timestamp() - (days_old * 24 * 60 * 60)
+            # Ищем JSON файлы с диалогами
+            json_files = [f for f in os.listdir(dataset_path) if f.endswith('.json')]
             
-            for filename in os.listdir(self.dialogue_storage):
-                filepath = os.path.join(self.dialogue_storage, filename)
-                
-                # Для файлов проверяем время изменения
-                if os.path.getmtime(filepath) < cutoff_date:
-                    os.remove(filepath)
-                    logger.info(f"Удален старый файл диалогов: {filename}")
+            for json_file in json_files:
+                file_path = os.path.join(dataset_path, json_file)
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
                     
+                    # Обрабатываем разные форматы диалогов
+                    if isinstance(data, list):
+                        for dialog in data:
+                            processed = await self.process_dialog_data(dialog)
+                            if processed:
+                                dialogs.append(processed)
+                    elif isinstance(data, dict):
+                        processed = await self.process_dialog_data(data)
+                        if processed:
+                            dialogs.append(processed)
+                            
         except Exception as e:
-            logger.error(f"Ошибка очистки старых диалогов: {e}")
+            logger.error(f"Ошибка загрузки диалогов: {e}")
+            
+        return dialogs
+
+    async def process_dialog_data(self, dialog_data: dict) -> dict:
+        """Предобработка данных диалога для обучения"""
+        try:
+            processed = {
+                'input_text': '',
+                'target_text': '',
+                'context': []
+            }
+            
+            # Обрабатываем разные форматы диалогов
+            if 'messages' in dialog_data:
+                # Формат: { "messages": [ {"role": "user", "content": "..."}, ... ] }
+                messages = dialog_data['messages']
+                for i, msg in enumerate(messages):
+                    if i < len(messages) - 1:
+                        processed['context'].append(msg['content'])
+                        
+                if len(messages) >= 2:
+                    processed['input_text'] = messages[-2]['content'] if messages[-2]['role'] == 'user' else ''
+                    processed['target_text'] = messages[-1]['content'] if messages[-1]['role'] == 'assistant' else ''
+                    
+            elif 'dialog' in dialog_data:
+                # Формат: { "dialog": ["вопрос", "ответ", ...] }
+                dialog = dialog_data['dialog']
+                for i in range(0, len(dialog) - 1, 2):
+                    if i + 1 < len(dialog):
+                        processed['context'].append(dialog[i])
+                        processed['target_text'] = dialog[i + 1]
+                        
+            elif 'question' in dialog_data and 'answer' in dialog_data:
+                # Формат: { "question": "...", "answer": "..." }
+                processed['input_text'] = dialog_data['question']
+                processed['target_text'] = dialog_data['answer']
+                
+            # Проверяем валидность данных
+            if not processed['input_text'] or not processed['target_text']:
+                return None
+                
+            return processed
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки диалога: {e}")
+            return None
+
+    async def create_dialog_model(self):
+        """Создание модели для диалогов"""
+        try:
+            # Простая модель на основе трансформеров или RNN
+            import torch
+            import torch.nn as nn
+            
+            class SimpleDialogModel(nn.Module):
+                def __init__(self, vocab_size=10000, embedding_dim=128, hidden_dim=256):
+                    super().__init__()
+                    self.embedding = nn.Embedding(vocab_size, embedding_dim)
+                    self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
+                    self.fc = nn.Linear(hidden_dim, vocab_size)
+                    
+                def forward(self, x):
+                    embedded = self.embedding(x)
+                    lstm_out, _ = self.lstm(embedded)
+                    output = self.fc(lstm_out[:, -1, :])  # Берем последний выход LSTM
+                    return output
+                    
+            model = SimpleDialogModel()
+            return model
+            
+        except Exception as e:
+            logger.error(f"Ошибка создания модели: {e}")
+            return None
+
+    async def train_dialog_model(self, dialogs: list, status_message):
+        """Обучение модели диалогов с исправленной обработкой целей"""
+        try:
+            import torch
+            import torch.nn as nn
+            from torch.utils.data import Dataset, DataLoader
+            
+            # Создаем Dataset
+            class DialogDataset(Dataset):
+                def __init__(self, dialogs, tokenizer, max_length=128):
+                    self.dialogs = dialogs
+                    self.tokenizer = tokenizer
+                    self.max_length = max_length
+                    
+                def __len__(self):
+                    return len(self.dialogs)
+                    
+                def __getitem__(self, idx):
+                    dialog = self.dialogs[idx]
+                    
+                    # Токенизируем вход и цель
+                    input_ids = self.tokenizer.encode(
+                        dialog['input_text'], 
+                        max_length=self.max_length, 
+                        padding='max_length', 
+                        truncation=True,
+                        return_tensors='pt'
+                    ).squeeze()
+                    
+                    target_ids = self.tokenizer.encode(
+                        dialog['target_text'],
+                        max_length=self.max_length,
+                        padding='max_length',
+                        truncation=True,
+                        return_tensors='pt'
+                    ).squeeze()
+                    
+                    # ИСПРАВЛЕНИЕ: Убеждаемся, что target имеет правильную размерность
+                    return {
+                        'input_ids': input_ids,
+                        'labels': target_ids  # Используем 'labels' вместо 'target_ids'
+                    }
+            
+            # Простой токенизатор (замените на ваш)
+            class SimpleTokenizer:
+                def __init__(self):
+                    self.vocab = {"<PAD>": 0, "<UNK>": 1}
+                    self.reverse_vocab = {0: "<PAD>", 1: "<UNK>"}
+                    
+                def encode(self, text, max_length=128, padding='max_length', truncation=True, return_tensors=None):
+                    # Простая токенизация по словам
+                    words = text.lower().split()[:max_length]
+                    ids = [self.vocab.get(word, 1) for word in words]
+                    
+                    # Добавляем паддинг или обрезаем
+                    if len(ids) < max_length and padding == 'max_length':
+                        ids.extend([0] * (max_length - len(ids)))
+                    elif len(ids) > max_length and truncation:
+                        ids = ids[:max_length]
+                        
+                    tensor = torch.tensor(ids, dtype=torch.long)
+                    if return_tensors == 'pt':
+                        return tensor.unsqueeze(0)  # Добавляем batch dimension
+                    return tensor
+            
+            # Инициализируем токенизатор и датасет
+            tokenizer = SimpleTokenizer()
+            dataset = DialogDataset(dialogs, tokenizer)
+            dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+            
+            # Настройка обучения
+            model = self.dialog_model
+            optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+            criterion = nn.CrossEntropyLoss(ignore_index=0)  # Игнорируем padding tokens
+            
+            # Цикл обучения
+            model.train()
+            for epoch in range(3):  # 3 эпохи для примера
+                total_loss = 0
+                for batch_idx, batch in enumerate(dataloader):
+                    optimizer.zero_grad()
+                    
+                    inputs = batch['input_ids']
+                    labels = batch['labels']
+                    
+                    # ИСПРАВЛЕНИЕ: Убеждаемся, что labels имеют правильную размерность
+                    outputs = model(inputs)
+                    
+                    # Изменяем размерности для loss функции
+                    # CrossEntropyLoss ожидает: (batch_size, num_classes) и (batch_size)
+                    loss = criterion(
+                        outputs.view(-1, outputs.size(-1)),  # (batch_size * seq_len, vocab_size)
+                        labels.view(-1)  # (batch_size * seq_len)
+                    )
+                    
+                    loss.backward()
+                    optimizer.step()
+                    
+                    total_loss += loss.item()
+                    
+                    if batch_idx % 10 == 0:
+                        await status_message.edit_text(
+                            f"🔄 Обучение... Эпоха {epoch+1}/3, Батч {batch_idx}, Loss: {loss.item():.4f}"
+                        )
+                
+                logger.info(f"Эпоха {epoch+1}, Средний loss: {total_loss/len(dataloader):.4f}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка обучения модели: {e}")
+            return False
+        def _cleanup_old_dialogues(self, days_old: int = 7):
+            """Очистка старых диалогов"""
+            try:
+                cutoff_date = datetime.now().timestamp() - (days_old * 24 * 60 * 60)
+                
+                for filename in os.listdir(self.dialogue_storage):
+                    filepath = os.path.join(self.dialogue_storage, filename)
+                    
+                    # Для файлов проверяем время изменения
+                    if os.path.getmtime(filepath) < cutoff_date:
+                        os.remove(filepath)
+                        logger.info(f"Удален старый файл диалогов: {filename}")
+                        
+            except Exception as e:
+                logger.error(f"Ошибка очистки старых диалогов: {e}")
 
 # =============================================================================
 # КЛАСС AdvancedAIAssistant
@@ -2943,6 +3343,21 @@ class Database:
         except Exception as e:
             logger.error(f"Ошибка при добавлении предмета: {e}")
             return None
+        finally:
+            conn.close()
+
+    def get_subject_name(self, subject_id: int) -> str:
+        """Получить название предмета по ID"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute('SELECT name FROM subjects WHERE id = ?', (subject_id,))
+            result = cursor.fetchone()
+            return result['name'] if result else "Неизвестный предмет"
+        except Exception as e:
+            logger.error(f"Ошибка получения названия предмета: {e}")
+            return "Неизвестный предмет"
         finally:
             conn.close()
 
@@ -3913,9 +4328,9 @@ class EnhancedLectureBot:
         self.ai_assistant = None
         self.code_manager = BotCodeManager(self)
         self.start_time = datetime.now()
-        self._initialize_bot()  
         self.file_manager = FileManager()
         self.mass_upload_handler = MassUploadHandler(self.db, self.file_manager)
+        self._initialize_bot()
         # Текст для помощника
         self.helper_text = "👋 Привет! Помогаю в разработке курсовых (от 2000), а также в подготовке отчетов учебных и производственных практик (от 500), проектных работ и докладов (от 200), практических заданий и конспектов (от 35). Создаю сайты (html, css, js, react, vue, django, php, nodeJS, tilda) и пишу программы (c#, pascal, python, delphia)"
         self.helper_contact = "@RaffLik"
@@ -3949,6 +4364,7 @@ class EnhancedLectureBot:
             logger.error(f"❌ Ошибка инициализации улучшенного бота: {e}")
             raise
     
+    
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на кнопки с исправленными обработчиками"""
         query = update.callback_query
@@ -3980,7 +4396,7 @@ class EnhancedLectureBot:
             elif data == "code_manager":
                 await self.code_manager_panel_callback(query, context)
             elif data == "back_to_menu":
-                await self.show_main_menu(Update(update_id=0, callback_query=query), context)
+                await self.show_main_menu(update, context)
             
             # Управление кодом
             elif data == "system_status":
@@ -4042,30 +4458,30 @@ class EnhancedLectureBot:
             elif data == "add_teacher":
                 await self.start_add_teacher(query, context)
             
-            # Загрузка файлов - ДОБАВЛЯЕМ ОБРАБОТЧИКИ
+            # Загрузка файлов
             elif data == "upload_file":
                 await self.start_single_upload(query, context)
-            elif data == "upload_file":
-                await self.start_single_upload(query, context)
-            elif query.data == "mass_upload":
-                mass_upload_handler = MassUploadHandler(self.db, self.file_manager)
-                await mass_upload_handler.start_mass_upload_simple(query, context)
+            elif data == "mass_upload":
+                # Используем MassUploadHandler для массовой загрузки
+                await self.mass_upload_handler.start_mass_upload_simple(query, context)
             elif data == "delete_files":
                 await self.show_delete_files_menu(query, context)
-            # Обработчики массовой загрузки
-            elif data.startswith("mass_upload_subject_"):
-                await self.select_subject_mass_upload(query, context)
-            elif data.startswith("mass_upload_type_"):
-                await self.select_file_type_mass_upload(query, context)
-            elif data == "mass_upload_finish":
-                await self.finish_mass_upload(query, context)
+            
+            # Обработчики массовой загрузки - ДОБАВИТЬ ЭТИ СТРОКИ:
+            elif data == "finish_mass_upload":
+                await self.mass_upload_handler.finish_upload(query, context)
             elif data == "mass_upload_confirm":
-                await self.confirm_mass_upload(query, context)
-            elif data.startswith("mass_upload_back_"):
-                await self.navigate_back_mass_upload(query, context)
+                await self.mass_upload_handler.confirm_upload(query, context)
             elif data == "cancel_mass_upload":
-                await self.cancel_mass_upload(query, context)
-                # Обработчики удаления файлов
+                await self.mass_upload_handler.cancel_upload(query, context)
+            elif data.startswith("mass_subject_"):
+                await self.mass_upload_handler.select_subject(query, context)
+            elif data.startswith("mass_type_"):
+                await self.mass_upload_handler.select_type(query, context)
+            elif data.startswith("mass_back_"):
+                await self.mass_upload_handler.navigate_back(query, context)
+            
+            # Обработчики удаления файлов
             elif data == "delete_lectures_menu":
                 await self.delete_lectures_menu(query, context)
             elif data == "delete_practices_menu":
@@ -4090,10 +4506,8 @@ class EnhancedLectureBot:
                 await self.cancel_file_deletion(query, context)
             elif data == "delete_back_subjects":
                 await self.show_delete_files_menu(query, context)
-            elif data == "delete_back_files":
-                subject_id = int(data.split('_')[-1]) if data.split('_')[-1].isdigit() else None
-                if subject_id:
-                    await self.show_subject_files_for_deletion(query, context, subject_id)
+            elif data.startswith("delete_back_files"):
+                await self.handle_delete_back_files(query, context, data)
             
             # Логи
             elif data == "view_logs":
@@ -4163,6 +4577,480 @@ class EnhancedLectureBot:
         except Exception as e:
             logger.error(f"Неожиданная ошибка в button_handler: {e}")
             await query.answer("❌ Произошла ошибка", show_alert=True)
+
+    async def manage_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Управление полезной информацией (админ)"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        useful_content = self.db.get_all_useful_content()
+        
+        keyboard = [
+            [InlineKeyboardButton("📤 Загрузить информацию", callback_data="upload_useful_info")],
+            [InlineKeyboardButton("📋 Просмотреть информацию", callback_data="view_useful_info")]
+        ]
+        
+        if useful_content:
+            for content in useful_content:
+                keyboard.append([
+                    InlineKeyboardButton(f"🗑️ Удалить: {content['title']}", callback_data=f"delete_useful_{content['id']}")
+                ])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "📦 Управление полезной информацией\n\n"
+            f"📊 Загружено файлов: {len(useful_content)}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def start_upload_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать загрузку полезной информации"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'uploading_useful_info'
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "📤 Загрузка полезной информации\n\n"
+            "Введите название для этого контента:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="manage_useful_info")]
+            ])
+        )
+
+    async def handle_useful_info_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE, title: str):
+        """Обработка загрузки полезной информации с названием"""
+        if not title.strip():
+            await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, укажите название.")
+            return
+        
+        context.user_data['useful_title'] = title.strip()
+        
+        await self.send_message_with_cleanup(
+            update, context,
+            f"📝 Название: {title}\n\n"
+            "Теперь отправьте файл."
+        )
+
+    async def save_useful_info_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Сохранение загруженной полезной информации"""
+        if not update.message.document:
+            await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, отправьте файл.")
+            return
+        
+        file = await update.message.document.get_file()
+        filename = update.message.document.file_name
+        
+        # Получаем название
+        useful_title = context.user_data.get('useful_title')
+        if not useful_title:
+            # Если название не было задано, используем имя файла
+            useful_title = os.path.splitext(filename)[0]
+        
+        try:
+            # Создаем директорию для полезной информации если не существует
+            useful_dir = "useful_info"
+            os.makedirs(useful_dir, exist_ok=True)
+            
+            file_path = os.path.join(useful_dir, filename)
+            await file.download_to_drive(file_path)
+            
+            # Определяем тип файла
+            file_extension = os.path.splitext(filename)[1].lower()
+            content_type = "document"
+            if file_extension in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
+                content_type = "image"
+            elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
+                content_type = "video"
+            
+            # Сохраняем в базу данных
+            content_id = self.db.add_useful_content(useful_title, file_path, content_type)
+            
+            context.user_data.clear()
+            
+            await self.send_message_with_cleanup(
+                update, context,
+                f"✅ Полезная информация '{useful_title}' успешно загружена!\n\n"
+                f"📁 Файл: {filename}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 Просмотреть информацию", callback_data="view_useful_info")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении полезной информации: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при сохранении: {str(e)}"
+            )
+
+    async def show_useful_info_list(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Показать список полезной информации (админ)"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        useful_content = self.db.get_all_useful_content()
+        
+        if not useful_content:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📦 Полезная информация\n\nПока нет загруженной информации.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📤 Загрузить информацию", callback_data="upload_useful_info")],
+                    [InlineKeyboardButton("🔙 Назад", callback_data="manage_useful_info")]
+                ])
+            )
+            return
+        
+        keyboard = []
+        for content in useful_content:
+            keyboard.append([
+                InlineKeyboardButton(f"📥 {content['title']}", callback_data=f"download_useful_{content['id']}"),
+                InlineKeyboardButton("🗑️", callback_data=f"delete_useful_{content['id']}")
+            ])
+        
+        keyboard.append([InlineKeyboardButton("📤 Загрузить новую информацию", callback_data="upload_useful_info")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="manage_useful_info")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "📦 Загруженная полезная информация:\n\n"
+            "📥 - скачать\n🗑️ - удалить",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def send_useful_file(self, query, content_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Отправить файл полезной информации"""
+        try:
+            content = self.db.get_useful_content(content_id)
+            
+            if not content:
+                await self.send_message_with_cleanup(Update(update_id=0, callback_query=query), context, "❌ Контент не найден")
+                return
+            
+            file_path = content['file_path']
+            
+            if not os.path.exists(file_path):
+                await self.send_message_with_cleanup(Update(update_id=0, callback_query=query), context, "❌ Файл не найден на сервере")
+                return
+            
+            caption = f"📄 {content['title']}"
+            
+            file_extension = os.path.splitext(file_path)[1].lower()
+            
+            with open(file_path, 'rb') as file:
+                if file_extension in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
+                    await query.message.reply_photo(
+                        photo=file,
+                        caption=caption
+                    )
+                elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
+                    await query.message.reply_video(
+                        video=file,
+                        caption=caption
+                    )
+                else:
+                    await query.message.reply_document(
+                        document=file,
+                        caption=caption
+                    )
+            
+            await self.send_message_with_cleanup(
+                Update(update_id=0, callback_query=query), context,
+                "Файл отправлен!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("ℹ️ Еще информация", callback_data="useful_info")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_menu")]
+                ])
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при отправке полезной информации: {e}")
+            await self.send_message_with_cleanup(Update(update_id=0, callback_query=query), context, "❌ Ошибка при отправке файла")
+
+    async def delete_useful_content(self, query, content_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Удалить полезную информацию"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        try:
+            content = self.db.get_useful_content(content_id)
+            
+            if not content:
+                await self.edit_message_with_cleanup(query, context, "❌ Контент не найден")
+                return
+            
+            # Удаляем файл с диска
+            file_path = content['file_path']
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            # Удаляем запись из базы данных
+            self.db.delete_useful_content(content_id)
+            
+            await self.edit_message_with_cleanup(
+                query, context,
+                f"✅ Контент '{content['title']}' успешно удален!",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📦 Управление информацией", callback_data="manage_useful_info")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка при удалении контента: {e}")
+            await self.edit_message_with_cleanup(
+                query, context,
+                f"❌ Ошибка при удалении контента: {str(e)}"
+            )
+
+    async def start_single_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начать одиночную загрузку файла"""
+        if query.from_user.id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
+        
+        subjects = self.db.get_all_subjects()
+        
+        if not subjects:
+            await self.edit_message_with_cleanup(
+                query, context,
+                "📤 Одиночная загрузка файла\n\n"
+                "❌ Сначала добавьте предметы.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+            return
+        
+        context.user_data.clear()
+        context.user_data['state'] = 'single_upload_subject'
+        
+        # Создаем клавиатуру с предметами
+        keyboard = []
+        for subject in subjects:
+            keyboard.append([InlineKeyboardButton(
+                f"📖 {subject['name']}", 
+                callback_data=f"upload_subject_{subject['id']}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")])
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            "📤 Одиночная загрузка файла\n\n"
+            "Выберите предмет для загрузки:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def handle_select_upload_subject(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора предмета для загрузки"""
+        context.user_data['upload_subject_id'] = subject_id
+        context.user_data['state'] = 'single_upload_type'
+        
+        subject = self.db.get_subject(subject_id)
+        
+        keyboard = [
+            [InlineKeyboardButton("📓 Лекция", callback_data="upload_type_lecture")],
+            [InlineKeyboardButton("📝 Практическая работа", callback_data="upload_type_practice")],
+            [InlineKeyboardButton("🔙 Назад к выбору предмета", callback_data="upload_file")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+        ]
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            f"📤 Одиночная загрузка файла\n\n"
+            f"📖 Предмет: {subject['name']}\n\n"
+            "Выберите тип файла:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def handle_select_upload_type(self, query, upload_type: str, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка выбора типа файла для загрузки"""
+        context.user_data['upload_type'] = upload_type
+        context.user_data['state'] = 'single_upload_number'
+        
+        subject_id = context.user_data.get('upload_subject_id')
+        subject = self.db.get_subject(subject_id)
+        
+        type_text = "лекцию" if upload_type == "lecture" else "практическую работу"
+        
+        await self.edit_message_with_cleanup(
+            query, context,
+            f"📤 Одиночная загрузка файла\n\n"
+            f"📖 Предмет: {subject['name']}\n"
+            f"📄 Тип: {type_text}\n\n"
+            "Введите номер (например, 1 для Лекции 1):",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Назад к выбору типа", callback_data=f"upload_subject_{subject_id}")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    async def handle_upload_number(self, update: Update, context: ContextTypes.DEFAULT_TYPE, number_text: str):
+        """Обработка ввода номера для загрузки"""
+        try:
+            number = int(number_text.strip())
+            if number <= 0:
+                raise ValueError("Номер должен быть положительным числом")
+        except ValueError:
+            await self.send_message_with_cleanup(update, context, "❌ Введите корректный номер (положительное число)")
+            return
+        
+        context.user_data['upload_number'] = number
+        context.user_data['state'] = 'single_upload_file'
+        
+        subject_id = context.user_data.get('upload_subject_id')
+        upload_type = context.user_data.get('upload_type')
+        subject = self.db.get_subject(subject_id)
+        
+        type_text = "лекцию" if upload_type == "lecture" else "практическую работу"
+        
+        await self.send_message_with_cleanup(
+            update, context,
+            f"📤 Одиночная загрузка файла\n\n"
+            f"📖 Предмет: {subject['name']}\n"
+            f"📄 Тип: {type_text}\n"
+            f"🔢 Номер: {number}\n\n"
+            "Теперь отправьте файл:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+            ])
+        )
+
+    async def save_single_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Сохранение одиночного файла"""
+        if not update.message.document:
+            await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, отправьте файл.")
+            return
+        
+        subject_id = context.user_data.get('upload_subject_id')
+        upload_type = context.user_data.get('upload_type')
+        number = context.user_data.get('upload_number')
+        
+        if not all([subject_id, upload_type, number]):
+            await self.send_message_with_cleanup(update, context, "❌ Ошибка: не все параметры загрузки установлены")
+            context.user_data.clear()
+            return
+        
+        file = await update.message.document.get_file()
+        filename = update.message.document.file_name
+        
+        try:
+            # Создаем директории если не существуют
+            base_dir = "lectures" if upload_type == "lecture" else "practices"
+            os.makedirs(base_dir, exist_ok=True)
+            
+            file_path = os.path.join(base_dir, filename)
+            await file.download_to_drive(file_path)
+            
+            subject = self.db.get_subject(subject_id)
+            
+            # Сохраняем в базу данных
+            if upload_type == "lecture":
+                lecture_id = self.db.add_lecture(subject_id, number, file_path)
+                success = lecture_id is not None
+                type_name = "лекция"
+            else:
+                practice_id = self.db.add_practice(subject_id, number, file_path)
+                success = practice_id is not None
+                type_name = "практическая работа"
+            
+            if success:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"✅ {type_name.capitalize()} №{number} успешно загружена!\n\n"
+                    f"📖 Предмет: {subject['name']}\n"
+                    f"📄 Файл: {filename}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📤 Загрузить еще файл", callback_data="upload_file")],
+                        [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+            else:
+                await self.send_message_with_cleanup(
+                    update, context,
+                    f"❌ Не удалось загрузить {type_name}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="upload_file")],
+                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                    ])
+                )
+        
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке файла: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                f"❌ Ошибка при загрузке файла: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        
+        context.user_data.clear()
+
+    async def handle_ai_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка сообщений в AI-чате"""
+        user_message = update.message.text.strip()
+        
+        if not user_message:
+            await self.send_message_with_cleanup(update, context, "Пожалуйста, введите ваш вопрос:")
+            return
+
+        await update.message.chat.send_action(action="typing")
+
+        try:
+            user_id = update.effective_user.id
+            ai_response, success, model_used = await self.ai_assistant.get_ai_response(user_id, user_message)
+
+            if 'ai_conversation' not in context.user_data:
+                context.user_data['ai_conversation'] = []
+
+            context.user_data['ai_conversation'].extend([
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": ai_response}
+            ])
+
+            if len(context.user_data['ai_conversation']) > 10:
+                context.user_data['ai_conversation'] = context.user_data['ai_conversation'][-10:]
+
+            keyboard = [
+                [InlineKeyboardButton("🧹 Очистить историю", callback_data="ai_clear_history")],
+                [InlineKeyboardButton("📊 Статистика ИИ", callback_data="ai_stats")],
+                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
+            ]
+
+            if update.effective_user.id in ADMIN_IDS:
+                keyboard.insert(0, [InlineKeyboardButton("📚 Обучить на датасете", callback_data="train_dataset")])
+
+            await self.send_message_with_cleanup(
+                update, context,
+                f"🤖 {ai_response}",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+
+        except Exception as e:
+            logger.error(f"Ошибка в AI чате: {e}")
+            await self.send_message_with_cleanup(
+                update, context,
+                "❌ Произошла ошибка при обработке вашего запроса. Попробуйте позже.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
+                ])
+            )
+
 
     async def show_delete_files_menu(self, query, context: ContextTypes.DEFAULT_TYPE):
     
@@ -4268,7 +5156,7 @@ class EnhancedLectureBot:
             "Это может занять несколько минут. Пожалуйста, подождите."
         )
         
-        # Исправленный вызов - теперь это асинхронный метод
+        # Исправленный вызов - используем метод code_manager
         success, message = await self.code_manager.update_code_from_github()
         
         await self.edit_message_with_cleanup(
@@ -5172,6 +6060,8 @@ class EnhancedLectureBot:
                 await self.handle_github_url(update, context, user_message)
             elif user_state == 'uploading_schedule':
                 await self.handle_schedule_upload(update, context, user_message)
+            elif user_state == 'single_upload_number':  
+                await self.handle_upload_number(update, context, user_message)
             elif user_state == 'uploading_useful_info':
                 await self.handle_useful_info_upload(update, context, user_message)
             # Добавляем обработку массовой загрузки
@@ -5691,132 +6581,7 @@ class EnhancedLectureBot:
             ])
         )
 
-    async def update_code_from_github(self, repo_url: str = None, branch: str = "main") -> Tuple[bool, str]:
-        """Асинхронная версия обновления кода из GitHub с улучшенной обработкой ошибок"""
-        try:
-            if not repo_url:
-                repo_url = "https://github.com/Yaroslav858/bot.py.git"  
-            
-            temp_dir = "temp_update"
-            
-            # УЛУЧШЕННАЯ ОЧИСТКА: проверяем и полностью удаляем существующую директорию
-            if os.path.exists(temp_dir):
-                logger.info(f"Удаляем существующую директорию {temp_dir}")
-                try:
-                    # Рекурсивно удаляем всю директорию
-                    import shutil
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    
-                    # Дополнительная проверка что директория удалена
-                    if os.path.exists(temp_dir):
-                        # Если не удалось удалить, пробуем другой подход
-                        import subprocess
-                        if os.name == 'nt':  # Windows
-                            subprocess.run(f'rmdir /s /q "{temp_dir}"', shell=True, capture_output=True)
-                        else:  # Linux/Mac
-                            subprocess.run(f'rm -rf "{temp_dir}"', shell=True, capture_output=True)
-                        
-                        # Ждем немного и проверяем снова
-                        await asyncio.sleep(2)
-                        
-                        if os.path.exists(temp_dir):
-                            return False, f"❌ Не удалось удалить существующую директорию {temp_dir}"
-                            
-                except Exception as e:
-                    logger.error(f"Ошибка удаления директории {temp_dir}: {e}")
-                    return False, f"❌ Ошибка удаления временной директории: {str(e)}"
     
-            # Ждем немного чтобы система освободила ресурсы
-            await asyncio.sleep(1)
-            
-            # Проверяем что директории действительно нет
-            if os.path.exists(temp_dir):
-                return False, f"❌ Директория {temp_dir} все еще существует после удаления"
-            
-            # Клонируем репозиторий
-            logger.info(f"Клонируем репозиторий {repo_url} ветка {branch}")
-            process = await asyncio.create_subprocess_exec(
-                "git", "clone", "-b", branch, "--depth", "1", repo_url, temp_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else stdout.decode()
-                logger.error(f"Ошибка клонирования: {error_msg}")
-                
-                # Очищаем директорию в случае ошибки
-                if os.path.exists(temp_dir):
-                    try:
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                    except:
-                        pass
-                
-                return False, f"❌ Ошибка клонирования: {error_msg}"
-            
-            # Создаем бэкап текущего кода
-            backup_success, backup_msg = await self.create_backup()
-            if not backup_success:
-                # Очищаем временную директорию
-                if os.path.exists(temp_dir):
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                return False, f"❌ Не удалось создать бэкап: {backup_msg}"
-            
-            # Копируем новые файлы (исключая конфигурационные)
-            exclude_files = {'bot_database.db', 'self_learning_model.pth', 'config.json', 'training_datasets', 'backups', 'user_dialogues'}
-            
-            copied_files = []
-            for item in os.listdir(temp_dir):
-                if item in exclude_files or item.startswith('.'):
-                    continue
-                    
-                src_path = os.path.join(temp_dir, item)
-                dst_path = os.path.join('.', item)
-                
-                try:
-                    if os.path.isdir(src_path):
-                        if os.path.exists(dst_path):
-                            logger.info(f"Удаляем существующую директорию {dst_path}")
-                            shutil.rmtree(dst_path, ignore_errors=True)
-                        logger.info(f"Копируем директорию {item}")
-                        shutil.copytree(src_path, dst_path)
-                    else:
-                        logger.info(f"Копируем файл {item}")
-                        shutil.copy2(src_path, dst_path)
-                    
-                    copied_files.append(item)
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка копирования {item}: {e}")
-                    # Продолжаем копирование других файлов
-            
-            logger.info(f"Скопировано файлов: {len(copied_files)}")
-            
-            # Очищаем временную директорию
-            if os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as e:
-                    logger.warning(f"Не удалось очистить временную директорию: {e}")
-            
-            if copied_files:
-                return True, f"✅ Код успешно обновлен из GitHub. Скопировано файлов: {len(copied_files)}. Требуется перезагрузция."
-            else:
-                return False, "❌ Не удалось скопировать ни одного файла"
-        
-        except Exception as e:
-            logger.error(f"Ошибка обновления кода: {e}")
-            # Гарантированная очистка временной директории
-            if os.path.exists("temp_update"):
-                try:
-                    shutil.rmtree("temp_update", ignore_errors=True)
-                except:
-                    pass
-            return False, f"❌ Ошибка обновления: {str(e)}"
-
-
     async def show_system_status(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Показать статус системы"""
         status = await self.code_manager.get_system_status()
@@ -6016,38 +6781,78 @@ class EnhancedLectureBot:
     # БЕЗОПАСНЫЕ МЕТОДЫ ДЛЯ УПРАВЛЕНИЯ ПОЛЕЗНОЙ ИНФОРМАЦИЕЙ
     # =============================================================================
 
-    async def manage_useful_info_safe(self, query, context):
+    async def show_useful_info_safe(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Безопасная версия показа полезной информации"""
+        try:
+            useful_content = self.db.get_all_useful_content()
+            
+            if not useful_content:
+                await self.edit_message_with_cleanup(
+                    query, context,
+                    "ℹ️ Полезная информация\n\n"
+                    "Пока нет доступной полезной информации.\n\n"
+                    "💡 Администратор может добавить информацию через админ-панель.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
+                    ])
+                )
+                return
+            
+            # Создаем клавиатуру с контентом
+            keyboard = []
+            for content in useful_content:
+                display_name = content['title'][:30] + "..." if len(content['title']) > 30 else content['title']
+                
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"📄 {display_name}", 
+                        callback_data=f"download_useful_{content['id']}"
+                    )
+                ])
+            
+            keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
+            
+            await self.edit_message_with_cleanup(
+                query, context,
+                "ℹ️ Полезная информация\n\n"
+                f"📁 Доступно материалов: {len(useful_content)}\n\n"
+                "Выберите материал для скачивания:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка в show_useful_info_safe: {e}")
+            await self.edit_message_with_cleanup(
+                query, context,
+                "❌ Произошла ошибка при загрузке полезной информации.\n\n"
+                "Попробуйте позже или обратитесь к администратору.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
+                ])
+            )
+
+    async def manage_useful_info_safe(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Безопасная версия manage_useful_info"""
         try:
-            if hasattr(self.db, 'get_all_useful_content'):
-                await self.manage_useful_info(query, context)
-            else:
-                await query.edit_message_text("❌ Функция управления полезной информацией временно недоступна")
+            await self.manage_useful_info(query, context)
         except Exception as e:
             logger.error(f"Ошибка в manage_useful_info_safe: {e}")
-            await query.edit_message_text("❌ Ошибка при управлении полезной информацией")
-
-    async def start_upload_useful_info_safe(self, query, context):
+            await self.edit_message_with_cleanup(
+                query, context,
+                "❌ Ошибка при управлении полезной информацией"
+            )
+    
+    async def start_upload_useful_info_safe(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Безопасная версия start_upload_useful_info"""
         try:
-            if hasattr(self.db, 'add_useful_content'):
-                await self.start_upload_useful_info(query, context)
-            else:
-                await query.edit_message_text("❌ Функция загрузки полезной информации временно недоступна")
+            await self.start_upload_useful_info(query, context)
         except Exception as e:
             logger.error(f"Ошибка в start_upload_useful_info_safe: {e}")
-            await query.edit_message_text("❌ Ошибка при загрузке полезной информации")
+            await self.edit_message_with_cleanup(
+                query, context,
+                "❌ Ошибка при загрузке полезной информации"
+            )
 
-    async def show_useful_info_list_safe(self, query, context):
-        """Безопасная версия show_useful_info_list"""
-        try:
-            if hasattr(self.db, 'get_all_useful_content'):
-                await self.show_useful_info_list(query, context)
-            else:
-                await query.edit_message_text("❌ Функция просмотра полезной информации временно недоступна")
-        except Exception as e:
-            logger.error(f"Ошибка в show_useful_info_list_safe: {e}")
-            await query.edit_message_text("❌ Ошибка при получении полезной информации")
 
     async def cleanup_previous_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Удаление предыдущих сообщений бота"""
@@ -6089,11 +6894,25 @@ class EnhancedLectureBot:
     async def edit_message_with_cleanup(self, query, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
         """Редактирование сообщения с автоматической очисткой предыдущих"""
         try:
-            await query.edit_message_text(text, **kwargs)
+            # Убедитесь, что query - это CallbackQuery, а не Update
+            if hasattr(query, 'edit_message_text'):
+                await query.edit_message_text(text, **kwargs)
+            else:
+                # Если это не CallbackQuery, попробуем отредактировать через message
+                if hasattr(query, 'message') and query.message:
+                    await query.message.edit_text(text, **kwargs)
+                else:
+                    # Если ничего не работает, отправляем новое сообщение
+                    fake_update = Update(update_id=0, message=query)
+                    await self.send_message_with_cleanup(fake_update, context, text, **kwargs)
         except Exception as e:
             logger.error(f"Ошибка при редактировании сообщения: {e}")
-            fake_update = Update(update_id=0, message=query.message)
-            await self.send_message_with_cleanup(fake_update, context, "❌ Лекция не найдена в базе данных")
+            # Если не удалось отредактировать, отправляем новое сообщение
+            try:
+                fake_update = Update(update_id=0, message=query.message if hasattr(query, 'message') else query)
+                await self.send_message_with_cleanup(fake_update, context, text, **kwargs)
+            except Exception as e2:
+                logger.error(f"Не удалось отправить сообщение: {e2}")
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик команды /start"""
@@ -6290,29 +7109,48 @@ class EnhancedLectureBot:
 
 
     def setup_handlers(self):
-        """Настройка обработчиков команд с новыми функциями"""
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("menu", self.show_main_menu))
-        self.application.add_handler(CommandHandler("admin", self.admin_panel))
-        self.application.add_handler(CommandHandler("cancel", self.cancel_operation))
-        self.application.add_handler(CommandHandler("ai", self.ai_chat))
-        self.application.add_handler(CommandHandler("ai_stats", self.show_ai_stats))
-        self.application.add_handler(CommandHandler("donate", self.show_donate))
-        self.application.add_handler(CommandHandler("code_manager", self.code_manager_panel))
-        self.application.add_handler(CommandHandler("force_learn", self.force_learning))
-        
-        # Обработчики сообщений для состояний
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
-        self.application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, self.handle_file_message))
-        
-        # Обработчики callback queries
-        self.application.add_handler(CallbackQueryHandler(self.button_handler))
+        """Настройка обработчиков команд с исправленными фильтрами"""
+        try:
+            # Основные команды
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(CommandHandler("menu", self.show_main_menu))
+            self.application.add_handler(CommandHandler("admin", self.admin_panel))
+            self.application.add_handler(CommandHandler("cancel", self.cancel_operation))
+            self.application.add_handler(CommandHandler("ai", self.ai_chat))
+            self.application.add_handler(CommandHandler("ai_stats", self.show_ai_stats))
+            self.application.add_handler(CommandHandler("donate", self.show_donate))
+            self.application.add_handler(CommandHandler("code_manager", self.code_manager_panel))
+            self.application.add_handler(CommandHandler("force_learn", self.force_learning))
+            
+            # Обработчики текстовых сообщений
+            self.application.add_handler(MessageHandler(
+                filters.TEXT & ~filters.COMMAND, 
+                self.handle_text_message
+            ))
+            
+            # Обработчики файлов - ИСПРАВЛЕННЫЕ ФИЛЬТРЫ
+            self.application.add_handler(MessageHandler(
+                filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO,
+                self.handle_file_message
+            ))
+            
+            # Обработчики callback queries
+            self.application.add_handler(CallbackQueryHandler(self.button_handler))
 
-        self.application.add_handler(MessageHandler(
-        filters.ALL, 
-        self.fallback_handler
-    ))
-    
+            # Fallback handler
+            self.application.add_handler(MessageHandler(
+                filters.ALL, 
+                self.fallback_handler
+            ))
+            
+            # Добавляем обработчики массовой загрузки
+            #setup_mass_upload_handlers(self.application, self.mass_upload_handler)
+            
+            logger.info("✅ Обработчики успешно настроены")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки обработчиков: {e}")
+            raise
     # =============================================================================
     # ДОБАВЛЕННЫЕ CALLBACK ОБРАБОТЧИКИ
     # =============================================================================
@@ -6823,50 +7661,6 @@ class MassUploadHandler:
         return ConversationHandler.END
 
 
-# Функция setup должна быть ВНЕ класса
-def setup_mass_upload_handlers(application, mass_upload_handler):
-    """Настройка обработчиков массовой загрузки"""
-    mass_upload_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(mass_upload_handler.start_mass_upload_simple, pattern="^mass_upload$"),
-            CallbackQueryHandler(mass_upload_handler.start_mass_upload_simple, pattern="^mass_upload_start$"),
-            CallbackQueryHandler(mass_upload_handler.start_mass_upload_simple, pattern="^mass_upload_simple$")
-        ],
-        states={
-            UPLOAD_FILES: [
-                MessageHandler(
-                    filters.DOCUMENT | filters.PHOTO | filters.VIDEO | filters.AUDIO,
-                    mass_upload_handler.handle_file_upload
-                ),
-                MessageHandler(
-                    filters.TEXT & ~filters.COMMAND,
-                    mass_upload_handler.handle_text_message  # ← ДОБАВЛЕНО
-                ),
-                CallbackQueryHandler(mass_upload_handler.finish_upload, pattern="^finish_mass_upload$")
-            ],
-            SELECT_SUBJECT: [
-                CallbackQueryHandler(mass_upload_handler.select_subject, pattern="^mass_subject_"),
-                CallbackQueryHandler(mass_upload_handler.navigate_back, pattern="^mass_back_subject$")
-            ],
-            SELECT_TYPE: [
-                CallbackQueryHandler(mass_upload_handler.select_type, pattern="^mass_type_"),
-                CallbackQueryHandler(mass_upload_handler.navigate_back, pattern="^mass_back_type$")
-            ],
-            CONFIRM_UPLOAD: [
-                CallbackQueryHandler(mass_upload_handler.confirm_upload, pattern="^mass_upload_confirm$"),
-                CallbackQueryHandler(mass_upload_handler.navigate_back, pattern="^mass_back_type$")
-            ]
-        },
-        fallbacks=[
-            CallbackQueryHandler(mass_upload_handler.cancel_upload, pattern="^cancel_mass_upload$"),
-            CallbackQueryHandler(mass_upload_handler.cancel_upload, pattern="^admin_panel$"),
-            CommandHandler("cancel", mass_upload_handler.cancel_upload)
-        ],
-        name="mass_upload",
-        persistent=False
-    )
-    
-    application.add_handler(mass_upload_conv)
 
 
 
@@ -6910,57 +7704,7 @@ def setup_mass_upload_handlers(application, mass_upload_handler):
 
 
     
-    async def handle_ai_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка сообщений в AI-чате"""
-        user_message = update.message.text.strip()
-        
-        if not user_message:
-            await self.send_message_with_cleanup(update, context, "Пожалуйста, введите ваш вопрос:")
-            return
-
-        await update.message.chat.send_action(action="typing")
-
-        try:
-            user_id = update.effective_user.id
-            ai_response, success, model_used = await self.ai_assistant.get_ai_response(user_id, user_message)
-
-            if 'ai_conversation' not in context.user_data:
-                context.user_data['ai_conversation'] = []
-
-            context.user_data['ai_conversation'].extend([
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": ai_response}
-            ])
-
-            if len(context.user_data['ai_conversation']) > 10:
-                context.user_data['ai_conversation'] = context.user_data['ai_conversation'][-10:]
-
-            keyboard = [
-                [InlineKeyboardButton("🧹 Очистить историю", callback_data="ai_clear_history")],
-                [InlineKeyboardButton("📊 Статистика ИИ", callback_data="ai_stats")],
-                [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
-            ]
-
-            if update.effective_user.id in ADMIN_IDS:
-                keyboard.insert(0, [InlineKeyboardButton("📚 Обучить на датасете", callback_data="train_dataset")])
-
-            await self.send_message_with_cleanup(
-                update, context,
-                f"🤖 {ai_response}",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode='Markdown'
-            )
-
-        except Exception as e:
-            logger.error(f"Ошибка в AI чате: {e}")
-            await self.send_message_with_cleanup(
-                update, context,
-                "❌ Произошла ошибка при обработке вашего запроса. Попробуйте позже.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_menu")]
-                ])
-            )
-
+    
     
 
 
@@ -7112,192 +7856,7 @@ def setup_mass_upload_handlers(application, mass_upload_handler):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-    async def start_single_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Начать одиночную загрузку файла"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
-            return
-        
-        subjects = self.db.get_all_subjects()
-        
-        if not subjects:
-            await self.edit_message_with_cleanup(
-                query, context,
-                "📤 Одиночная загрузка файла\n\n"
-                "❌ Сначала добавьте предметы.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-            return
-        
-        context.user_data.clear()
-        context.user_data['state'] = 'single_upload_subject'
-        
-        # Создаем клавиатуру с предметами
-        keyboard = []
-        for subject in subjects:
-            keyboard.append([InlineKeyboardButton(
-                f"📖 {subject['name']}", 
-                callback_data=f"upload_subject_{subject['id']}"
-            )])
-        
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")])
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            "📤 Одиночная загрузка файла\n\n"
-            "Выберите предмет для загрузки:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    async def handle_select_upload_subject(self, query, subject_id: int, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка выбора предмета для загрузки"""
-        context.user_data['upload_subject_id'] = subject_id
-        context.user_data['state'] = 'single_upload_type'
-        
-        subject = self.db.get_subject(subject_id)
-        
-        keyboard = [
-            [InlineKeyboardButton("📓 Лекция", callback_data="upload_type_lecture")],
-            [InlineKeyboardButton("📝 Практическая работа", callback_data="upload_type_practice")],
-            [InlineKeyboardButton("🔙 Назад к выбору предмета", callback_data="upload_file")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-        ]
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            f"📤 Одиночная загрузка файла\n\n"
-            f"📖 Предмет: {subject['name']}\n\n"
-            "Выберите тип файла:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    async def handle_select_upload_type(self, query, upload_type: str, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка выбора типа файла для загрузки"""
-        context.user_data['upload_type'] = upload_type
-        context.user_data['state'] = 'single_upload_number'
-        
-        subject_id = context.user_data.get('upload_subject_id')
-        subject = self.db.get_subject(subject_id)
-        
-        type_text = "лекцию" if upload_type == "lecture" else "практическую работу"
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            f"📤 Одиночная загрузка файла\n\n"
-            f"📖 Предмет: {subject['name']}\n"
-            f"📄 Тип: {type_text}\n\n"
-            "Введите номер (например, 1 для Лекции 1):",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Назад к выбору типа", callback_data=f"upload_subject_{subject_id}")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-            ])
-        )
-
-    async def handle_upload_number(self, update: Update, context: ContextTypes.DEFAULT_TYPE, number_text: str):
-        """Обработка ввода номера для загрузки"""
-        try:
-            number = int(number_text.strip())
-            if number <= 0:
-                raise ValueError("Номер должен быть положительным числом")
-        except ValueError:
-            await self.send_message_with_cleanup(update, context, "❌ Введите корректный номер (положительное число)")
-            return
-        
-        context.user_data['upload_number'] = number
-        context.user_data['state'] = 'single_upload_file'
-        
-        subject_id = context.user_data.get('upload_subject_id')
-        upload_type = context.user_data.get('upload_type')
-        subject = self.db.get_subject(subject_id)
-        
-        type_text = "лекцию" if upload_type == "lecture" else "практическую работу"
-        
-        await self.send_message_with_cleanup(
-            update, context,
-            f"📤 Одиночная загрузка файла\n\n"
-            f"📖 Предмет: {subject['name']}\n"
-            f"📄 Тип: {type_text}\n"
-            f"🔢 Номер: {number}\n\n"
-            "Теперь отправьте файл:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
-            ])
-        )
-
-    async def save_single_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Сохранение одиночного файла"""
-        if not update.message.document:
-            await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, отправьте файл.")
-            return
-        
-        subject_id = context.user_data.get('upload_subject_id')
-        upload_type = context.user_data.get('upload_type')
-        number = context.user_data.get('upload_number')
-        
-        if not all([subject_id, upload_type, number]):
-            await self.send_message_with_cleanup(update, context, "❌ Ошибка: не все параметры загрузки установлены")
-            context.user_data.clear()
-            return
-        
-        file = await update.message.document.get_file()
-        filename = update.message.document.file_name
-        
-        try:
-            # Создаем директории если не существуют
-            base_dir = "lectures" if upload_type == "lecture" else "practices"
-            os.makedirs(base_dir, exist_ok=True)
-            
-            file_path = os.path.join(base_dir, filename)
-            await file.download_to_drive(file_path)
-            
-            subject = self.db.get_subject(subject_id)
-            
-            # Сохраняем в базу данных
-            if upload_type == "lecture":
-                lecture_id = self.db.add_lecture(subject_id, number, file_path)
-                success = lecture_id is not None
-                type_name = "лекция"
-            else:
-                practice_id = self.db.add_practice(subject_id, number, file_path)
-                success = practice_id is not None
-                type_name = "практическая работа"
-            
-            if success:
-                await self.send_message_with_cleanup(
-                    update, context,
-                    f"✅ {type_name.capitalize()} №{number} успешно загружена!\n\n"
-                    f"📖 Предмет: {subject['name']}\n"
-                    f"📄 Файл: {filename}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📤 Загрузить еще файл", callback_data="upload_file")],
-                        [InlineKeyboardButton("📚 Просмотреть предметы", callback_data="subjects")],
-                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                    ])
-                )
-            else:
-                await self.send_message_with_cleanup(
-                    update, context,
-                    f"❌ Не удалось загрузить {type_name}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="upload_file")],
-                        [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                    ])
-                )
-        
-        except Exception as e:
-            logger.error(f"Ошибка при загрузке файла: {e}")
-            await self.send_message_with_cleanup(
-                update, context,
-                f"❌ Ошибка при загрузке файла: {str(e)}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-                ])
-            )
-        
-        context.user_data.clear()
+    
 
     async def start_upload_schedule(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Начать загрузку расписания"""
@@ -7511,277 +8070,6 @@ async def delete_schedule(self, query, schedule_id: int, context: ContextTypes.D
         await self.edit_message_with_cleanup(
             query, context,
             f"❌ Ошибка при удалении расписания: {str(e)}"
-        )
-
-async def show_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Показать полезную информацию"""
-    useful_content = self.db.get_all_useful_content()
-    
-    if not useful_content:
-        await self.edit_message_with_cleanup(
-            query, context,
-            "ℹ️ Полезная информация\n\nПока нет доступной полезной информации.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")]
-            ])
-        )
-        return
-    
-    keyboard = []
-    for content in useful_content:
-        folder_name = content.get('folder_name', 'Без папки')
-        keyboard.append([
-            InlineKeyboardButton(
-                f"📄 {content['title']} ({folder_name})", 
-                callback_data=f"download_useful_{content['id']}"
-            )
-        ])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_menu")])
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        "ℹ️ Полезная информация\nВыберите файл для скачивания:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def manage_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Управление полезной информацией (админ)"""
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("❌ У вас нет доступа", show_alert=True)
-        return
-    
-    useful_content = self.db.get_all_useful_content()
-    folders = self.db.get_all_useful_folders()
-    
-    keyboard = [
-        [InlineKeyboardButton("📤 Загрузить информацию", callback_data="upload_useful_info")],
-        [InlineKeyboardButton("📋 Просмотреть информацию", callback_data="view_useful_info")]
-    ]
-    
-    if useful_content:
-        for content in useful_content:
-            keyboard.append([
-                InlineKeyboardButton(f"🗑️ Удалить: {content['title']}", callback_data=f"delete_useful_{content['id']}")
-            ])
-    
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")])
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        "📦 Управление полезной информацией\n\n"
-        f"📊 Загружено файлов: {len(useful_content)}\n"
-        f"📁 Папок: {len(folders)}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def start_upload_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Начать загрузку полезной информации"""
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("❌ У вас нет доступа", show_alert=True)
-        return
-    
-    context.user_data.clear()
-    context.user_data['state'] = 'uploading_useful_info'
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        "📤 Загрузка полезной информации\n\n"
-        "Введите название для этого контента:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("❌ Отмена", callback_data="manage_useful_info")]
-        ])
-    )
-
-async def handle_useful_info_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE, title: str):
-    """Обработка загрузки полезной информации с названием"""
-    if not title.strip():
-        await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, укажите название.")
-        return
-    
-    context.user_data['useful_title'] = title.strip()
-    
-    await self.send_message_with_cleanup(
-        update, context,
-        f"📝 Название: {title}\n\n"
-        "Теперь отправьте файл."
-    )
-
-async def save_useful_info_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Сохранение загруженной полезной информации"""
-    if not update.message.document:
-        await self.send_message_with_cleanup(update, context, "❌ Пожалуйста, отправьте файл.")
-        return
-    
-    file = await update.message.document.get_file()
-    filename = update.message.document.file_name
-    
-    # Получаем название
-    useful_title = context.user_data.get('useful_title')
-    if not useful_title:
-        # Если название не было задано, используем имя файла
-        useful_title = os.path.splitext(filename)[0]
-    
-    try:
-        # Создаем директорию для полезной информации если не существует
-        useful_dir = "useful_info"
-        os.makedirs(useful_dir, exist_ok=True)
-        
-        file_path = os.path.join(useful_dir, filename)
-        await file.download_to_drive(file_path)
-        
-        # Определяем тип файла
-        file_extension = os.path.splitext(filename)[1].lower()
-        content_type = "document"
-        if file_extension in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
-            content_type = "image"
-        elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-            content_type = "video"
-        
-        # Сохраняем в базу данных
-        content_id = self.db.add_useful_content(useful_title, file_path, content_type)
-        
-        context.user_data.clear()
-        
-        await self.send_message_with_cleanup(
-            update, context,
-            f"✅ Полезная информация '{useful_title}' успешно загружена!\n\n"
-            f"📁 Файл: {filename}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📋 Просмотреть информацию", callback_data="view_useful_info")],
-                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-            ])
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении полезной информации: {e}")
-        await self.send_message_with_cleanup(
-            update, context,
-            f"❌ Ошибка при сохранении: {str(e)}"
-        )
-
-async def show_useful_info_list(self, query, context: ContextTypes.DEFAULT_TYPE):
-    """Показать список полезной информации (админ)"""
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("❌ У вас нет доступа", show_alert=True)
-        return
-    
-    useful_content = self.db.get_all_useful_content()
-    
-    if not useful_content:
-        await self.edit_message_with_cleanup(
-            query, context,
-            "📦 Полезная информация\n\nПока нет загруженной информации.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📤 Загрузить информацию", callback_data="upload_useful_info")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="manage_useful_info")]
-            ])
-        )
-        return
-    
-    keyboard = []
-    for content in useful_content:
-        keyboard.append([
-            InlineKeyboardButton(f"📥 {content['title']}", callback_data=f"download_useful_{content['id']}"),
-            InlineKeyboardButton("🗑️", callback_data=f"delete_useful_{content['id']}")
-        ])
-    
-    keyboard.append([InlineKeyboardButton("📤 Загрузить новую информацию", callback_data="upload_useful_info")])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="manage_useful_info")])
-    
-    await self.edit_message_with_cleanup(
-        query, context,
-        "📦 Загруженная полезная информация:\n\n"
-        "📥 - скачать\n🗑️ - удалить",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def send_useful_file(self, query, content_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Отправить файл полезной информации"""
-    try:
-        content = self.db.get_useful_content(content_id)
-        
-        if not content:
-            await self.send_message_with_cleanup(Update(update_id=0, callback_query=query), context, "❌ Контент не найден")
-            return
-        
-        file_path = content['file_path']
-        
-        if not os.path.exists(file_path):
-            await self.send_message_with_cleanup(Update(update_id=0, callback_query=query), context, "❌ Файл не найден на сервере")
-            return
-        
-        caption = f"📄 {content['title']}"
-        if content.get('folder_name'):
-            caption += f" ({content['folder_name']})"
-        
-        file_extension = os.path.splitext(file_path)[1].lower()
-        
-        with open(file_path, 'rb') as file:
-            if file_extension in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
-                await query.message.reply_photo(
-                    photo=file,
-                    caption=caption
-                )
-            elif file_extension in ['.mp4', '.avi', '.mov', '.mkv']:
-                await query.message.reply_video(
-                    video=file,
-                    caption=caption
-                )
-            else:
-                await query.message.reply_document(
-                    document=file,
-                    caption=caption
-                )
-        
-        await self.send_message_with_cleanup(
-            Update(update_id=0, callback_query=query), context,
-            "Файл отправлен!",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("ℹ️ Еще информация", callback_data="useful_info")],
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_menu")]
-            ])
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка при отправке полезной информации: {e}")
-        await self.send_message_with_cleanup(Update(update_id=0, callback_query=query), context, "❌ Ошибка при отправке файла")
-
-async def delete_useful_content(self, query, content_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Удалить полезную информацию"""
-    if query.from_user.id not in ADMIN_IDS:
-        await query.answer("❌ У вас нет доступа", show_alert=True)
-        return
-    
-    try:
-        content = self.db.get_useful_content(content_id)
-        
-        if not content:
-            await self.edit_message_with_cleanup(query, context, "❌ Контент не найден")
-            return
-        
-        # Удаляем файл с диска
-        file_path = content['file_path']
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        
-        # Удаляем запись из базы данных
-        self.db.delete_useful_content(content_id)
-        
-        await self.edit_message_with_cleanup(
-            query, context,
-            f"✅ Контент '{content['title']}' успешно удален!",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📦 Управление информацией", callback_data="manage_useful_info")],
-                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-            ])
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка при удалении контента: {e}")
-        await self.edit_message_with_cleanup(
-            query, context,
-            f"❌ Ошибка при удалении контента: {str(e)}"
         )
 
 async def show_admin_panel(self, query, context: ContextTypes.DEFAULT_TYPE):
