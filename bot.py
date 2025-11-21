@@ -1,10 +1,19 @@
 import os
+os.environ['NO_PROXY'] = '*'
+os.environ['HTTP_PROXY'] = ''
+os.environ['HTTPS_PROXY'] = ''
 import logging
 import time
 import sys
 import re
 import sqlite3
+import httpx
 import requests
+try:
+    response = requests.get("https://api.telegram.org", timeout=10)
+    print("✅ Интернет соединение работает")
+except:
+    print("❌ Нет интернет соединения")
 import asyncio
 import json
 import numpy as np
@@ -19,6 +28,7 @@ import pickle
 import csv
 import openpyxl
 import pandas as pd
+import telegram
 #from File_Manager import FileManager
 from openpyxl import load_workbook
 from telegram import Update
@@ -36,6 +46,8 @@ import psutil
 from pathlib import Path
 from datetime import timedelta
 from enum import Enum
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.base import BaseEstimator, TransformerMixin
 
 
 
@@ -62,7 +74,21 @@ HUGGING_FACE_MODELS = [
     "facebook/blenderbot-400M-distill"
 ]
 
-
+# ДОБАВЬТЕ ЭТУ ФУНКЦИЮ В НАЧАЛО ФАЙЛА (после импортов)
+def safe_len(obj):
+    """Безопасная замена len() для работы с разреженными матрицами"""
+    try:
+        if hasattr(obj, 'shape') and hasattr(obj.shape, '__len__') and len(obj.shape) > 0:
+            return obj.shape[0]
+        elif hasattr(obj, '__len__'):
+            return len(obj)
+        else:
+            return 0
+    except TypeError:
+        # Если возникает ошибка "sparse array length is ambiguous"
+        if hasattr(obj, 'shape') and hasattr(obj.shape, '__len__') and len(obj.shape) > 0:
+            return obj.shape[0]
+        return 0
 
 class FileManager:
     """Простой менеджер файлов для загрузки"""
@@ -407,6 +433,14 @@ class BotCodeManager:
                 fp = os.path.join(dirpath, f)
                 total += os.path.getsize(fp)
         return f"{total / 1024 / 1024:.2f} MB"
+    
+    def get_dialogue_stats(self):
+        """Получить статистику по диалогам"""
+        return {
+            "total_pairs": len(self.dialogue_pairs),
+            "learning_enabled": self.learning_from_dialogues,
+            "min_dialogue_length": self.min_dialogue_length
+        }
     
     async def list_backups(self) -> List[Dict[str, Any]]:
         """Получить список бэкапов"""
@@ -761,6 +795,73 @@ class DatasetManager:
 # ИСПРАВЛЕННЫЙ КЛАСС ДЛЯ ЗАГРУЗКИ С GITHUB
 # =============================================================================
 
+import os
+import json
+import yaml
+import pickle
+import pandas as pd
+import numpy as np
+import xml.etree.ElementTree as ET
+from typing import List, Tuple, Dict, Any, Optional
+import logging
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.base import BaseEstimator, TransformerMixin
+
+logger = logging.getLogger(__name__)
+
+class SimpleTextVectorizer(BaseEstimator, TransformerMixin):
+    def __init__(self, method='tfidf', max_features=5000, ngram_range=(1, 2)):
+        self.method = method
+        self.max_features = max_features
+        self.ngram_range = ngram_range
+        self.vectorizer = None
+        
+    def fit(self, X, y=None):
+        if self.method == 'tfidf':
+            self.vectorizer = TfidfVectorizer(
+                max_features=self.max_features,
+                ngram_range=self.ngram_range,
+                stop_words='english',
+                max_df=0.8,
+                min_df=2
+            )
+        else:
+            self.vectorizer = CountVectorizer(
+                max_features=self.max_features,
+                ngram_range=self.ngram_range,
+                stop_words='english',
+                max_df=0.8,
+                min_df=2
+            )
+        
+        self.vectorizer.fit(X)
+        return self
+    
+    def transform(self, X):
+        return self.vectorizer.transform(X)
+    
+    def fit_transform(self, X, y=None):
+        return self.fit(X, y).transform(X)
+    
+    def get_feature_names_out(self):
+        """Получить названия фич"""
+        if hasattr(self.vectorizer, 'get_feature_names_out'):
+            return self.vectorizer.get_feature_names_out()
+        elif hasattr(self.vectorizer, 'get_feature_names'):
+            return self.vectorizer.get_feature_names()
+        else:
+            return []
+    
+    def _prepare_data(self, X):
+        """Подготовка данных для векторизации"""
+        if isinstance(X, pd.Series):
+            return X.fillna('').astype(str).values
+        elif isinstance(X, pd.DataFrame):
+            return X.iloc[:, 0].fillna('').astype(str).values
+        else:
+            return np.array(X).astype(str)
+
+
 class AdvancedDatasetLoader:
     """Расширенный загрузчик датасетов с поддержкой множества форматов"""
     
@@ -790,11 +891,74 @@ class AdvancedDatasetLoader:
             if ext in extensions:
                 return format_type
         return None
+
+    def get_available_datasets(self) -> List[Dict[str, Any]]:
+        """Получить список доступных датасетов с информацией"""
+        try:
+            files = os.listdir(self.datasets_dir)
+            datasets = []
+            
+            for file in files:
+                if any(file.endswith(ext) for ext in self.get_all_supported_extensions()):
+                    info = self.get_dataset_info(file)
+                    datasets.append(info)
+            
+            logger.info(f"Найдено датасетов: {len(datasets)}")
+            return datasets
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения списка датасетов: {e}")
+            return []
     
-    async def download_from_github(self, url: str) -> Optional[str]:
-        """Скачать датасет с GitHub (использует улучшенный GitHubDatasetLoader)"""
-        github_loader = GitHubDatasetLoader()
-        return await github_loader.download_from_github(url)
+    def _prepare_data(self, texts: List[str], labels: List[str]) -> Tuple[np.ndarray, np.ndarray]:
+        """Подготовка данных для обучения"""
+        if not texts:
+            logger.error("Датасет не содержит данных")
+            return np.array([]), np.array([])
+        
+        # Фильтруем пустые тексты
+        filtered_texts = []
+        filtered_labels = []
+        
+        for text, label in zip(texts, labels):
+            if text and isinstance(text, str) and text.strip():
+                filtered_texts.append(text.strip())
+                filtered_labels.append(str(label))
+        
+        if not filtered_texts:
+            logger.error("После фильтрации датасет не содержит данных")
+            return np.array([]), np.array([])
+        
+        logger.info(f"Загружено {len(filtered_texts)} примеров, {len(set(filtered_labels))} уникальных меток")
+        
+        # Векторизация текстов с улучшенным SimpleTextVectorizer
+        vectorizer = SimpleTextVectorizer(max_features=1000)
+        
+        # Подготовка данных для векторизатора
+        prepared_texts = vectorizer._prepare_data(filtered_texts)
+        X = vectorizer.fit_transform(prepared_texts)
+        
+        # ИСПРАВЛЕНИЕ: Преобразуем разреженную матрицу в плотную
+        if hasattr(X, 'toarray'):
+            X = X.toarray()
+            logger.info("✅ Преобразована разреженная матрица признаков в плотную")
+        
+        # Преобразование меток в числовой формат
+        unique_labels = list(set(filtered_labels))
+        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+        y = np.array([label_to_idx[label] for label in filtered_labels])
+        
+        # ИСПРАВЛЕНИЕ: Используем shape[0] вместо len()
+        if X.shape[0] == 0:
+            logger.error("После векторизации данные пусты")
+            return np.array([]), np.array([])
+        
+        logger.info(f"Размерность матрицы признаков: {X.shape}")
+        logger.info(f"Уникальные метки: {unique_labels}")
+        
+        return X, y
+    
+    
     
     def load_dataset(self, filename: str) -> Tuple[np.ndarray, np.ndarray]:
         """Загрузка датасета из файла с улучшенной обработкой ошибок"""
@@ -825,18 +989,12 @@ class AdvancedDatasetLoader:
                 return self._load_json_dataset(filepath)
             elif file_format == 'csv':
                 return self._load_csv_dataset(filepath)
-            elif file_format == 'excel':
-                return self._load_excel_dataset(filepath)
             elif file_format == 'text':
                 return self._load_text_dataset(filepath)
             elif file_format == 'yaml':
                 return self._load_yaml_dataset(filepath)
             elif file_format == 'xml':
                 return self._load_xml_dataset(filepath)
-            elif file_format == 'parquet':
-                return self._load_parquet_dataset(filepath)
-            elif file_format == 'feather':
-                return self._load_feather_dataset(filepath)
             elif file_format == 'pickle':
                 return self._load_pickle_dataset(filepath)
             else:
@@ -855,6 +1013,10 @@ class AdvancedDatasetLoader:
             logger.error(f"Диагностика JSON файла: {diagnosis}")
         
         return np.array([]), np.array([])
+    
+    def _load_large_json(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Загрузка больших JSON файлов"""
+        return self._load_jsonl_dataset(filepath)
     
     def _load_json_dataset(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
         """Загрузка JSON датасета с улучшенной обработкой ошибок"""
@@ -1017,7 +1179,6 @@ class AdvancedDatasetLoader:
         except Exception as e:
             return {'error': f'Диагностика не удалась: {str(e)}'}
 
-
     def _extract_from_item(self, item: Any, texts: List[str], labels: List[str]):
         """Извлечение текста и меток из элемента данных"""
         if isinstance(item, dict):
@@ -1129,58 +1290,6 @@ class AdvancedDatasetLoader:
             logger.error(f"Ошибка загрузки CSV датасета: {e}")
             return np.array([]), np.array([])
     
-    def _load_excel_dataset(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Загрузка Excel датасета"""
-        try:
-            # Загружаем все листы
-            excel_file = pd.ExcelFile(filepath)
-            all_texts = []
-            all_labels = []
-            
-            for sheet_name in excel_file.sheet_names:
-                df = pd.read_excel(filepath, sheet_name=sheet_name)
-                
-                texts = []
-                labels = []
-                
-                # Поиск колонок с текстом и метками
-                text_columns = ['text', 'content', 'question', 'input', 'sentence']
-                label_columns = ['label', 'category', 'class', 'target']
-                
-                text_col = None
-                label_col = None
-                
-                for col in df.columns:
-                    col_lower = str(col).lower()
-                    if any(tc in col_lower for tc in text_columns):
-                        text_col = col
-                    elif any(lc in col_lower for lc in label_columns):
-                        label_col = col
-                
-                # Если не нашли, используем первую колонку для текста
-                if text_col is None and len(df.columns) > 0:
-                    text_col = df.columns[0]
-                if label_col is None and len(df.columns) > 1:
-                    label_col = df.columns[1]
-                
-                if text_col is not None:
-                    for _, row in df.iterrows():
-                        text = str(row[text_col]) if pd.notna(row[text_col]) else ""
-                        label = str(row[label_col]) if label_col and pd.notna(row.get(label_col, '')) else f"sheet_{sheet_name}"
-                        
-                        if text.strip():
-                            texts.append(text)
-                            labels.append(label)
-                
-                all_texts.extend(texts)
-                all_labels.extend(labels)
-            
-            return self._prepare_data(all_texts, all_labels)
-            
-        except Exception as e:
-            logger.error(f"Ошибка загрузки Excel датасета: {e}")
-            return np.array([]), np.array([])
-    
     def _load_text_dataset(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
         """Загрузка текстового датасета"""
         try:
@@ -1271,24 +1380,6 @@ class AdvancedDatasetLoader:
         for child in element:
             self._extract_from_xml(child, texts, labels)
     
-    def _load_parquet_dataset(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Загрузка Parquet датасета"""
-        try:
-            df = pd.read_parquet(filepath)
-            return self._process_dataframe(df)
-        except Exception as e:
-            logger.error(f"Ошибка загрузки Parquet датасета: {e}")
-            return np.array([]), np.array([])
-    
-    def _load_feather_dataset(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
-        """Загрузка Feather датасета"""
-        try:
-            df = pd.read_feather(filepath)
-            return self._process_dataframe(df)
-        except Exception as e:
-            logger.error(f"Ошибка загрузки Feather датасета: {e}")
-            return np.array([]), np.array([])
-    
     def _load_pickle_dataset(self, filepath: str) -> Tuple[np.ndarray, np.ndarray]:
         """Загрузка Pickle датасета"""
         try:
@@ -1358,39 +1449,139 @@ class AdvancedDatasetLoader:
                     labels.append(label)
         
         return self._prepare_data(texts, labels)
-    
-    def _prepare_data(self, texts: List[str], labels: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-        """Подготовка данных для обучения"""
-        if not texts:
-            logger.error("Датасет не содержит данных")
-            return np.array([]), np.array([])
-        
-        # Фильтруем пустые тексты
-        filtered_texts = []
-        filtered_labels = []
-        
-        for text, label in zip(texts, labels):
-            if text and isinstance(text, str) and text.strip():
-                filtered_texts.append(text.strip())
-                filtered_labels.append(str(label))
-        
-        if not filtered_texts:
-            logger.error("После фильтрации датасет не содержит данных")
-            return np.array([]), np.array([])
-        
-        logger.info(f"Загружено {len(filtered_texts)} примеров, {len(set(filtered_labels))} уникальных меток")
-        
-        # Векторизация текстов
-        vectorizer = SimpleTextVectorizer(max_features=1000)
-        X = vectorizer.fit_transform(filtered_texts)
-        
-        # Преобразование меток в числовой формат
-        unique_labels = list(set(filtered_labels))
-        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
-        y = np.array([label_to_idx[label] for label in filtered_labels])
-        
-        return X, y
-    
+
+    def load_large_csv_with_vectorization(self, csv_path, text_column='text', label_column='label', chunksize=10000):
+        """
+        Загрузка и обработка большого CSV файла по частям
+        """
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(csv_path):
+                logger.error(f"Файл не найден: {csv_path}")
+                return None, None, None
+            
+            # Сначала прочитаем для анализа
+            try:
+                sample_df = pd.read_csv(csv_path, nrows=1000)
+                logger.info(f"Колонки в CSV: {sample_df.columns.tolist()}")
+                
+                # Проверяем наличие нужных колонок
+                if text_column not in sample_df.columns:
+                    logger.error(f"Колонка '{text_column}' не найдена в CSV")
+                    return None, None, None
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при анализе CSV файла: {e}")
+                return None, None, None
+            
+            # Инициализируем векторизатор
+            vectorizer = SimpleTextVectorizer(max_features=1000)
+            
+            # Собираем все данные для обучения
+            all_texts = []
+            all_labels = []
+            
+            try:
+                for i, chunk in enumerate(pd.read_csv(csv_path, chunksize=chunksize)):
+                    logger.info(f"Обработка чанка {i+1}")
+                    
+                    # Обработка текстовых данных
+                    text_data = chunk[text_column].fillna('')
+                    
+                    # Обработка меток (если есть)
+                    if label_column in chunk.columns:
+                        labels_data = chunk[label_column].fillna('unknown')
+                    else:
+                        labels_data = ['unknown'] * len(chunk)
+                    
+                    # Фильтрация пустых текстов
+                    for text, label in zip(text_data, labels_data):
+                        if text and isinstance(text, str) and text.strip():
+                            all_texts.append(text.strip())
+                            all_labels.append(str(label))
+                
+                logger.info(f"Всего собрано {len(all_texts)} примеров")
+                
+                if not all_texts:
+                    logger.error("Не найдено подходящих текстов для обучения")
+                    return None, None, None
+                
+                # Подготовка данных с использованием улучшенной функции
+                X, y = self._prepare_data(all_texts, all_labels)
+                
+                return X, y, vectorizer
+                
+            except Exception as e:
+                logger.error(f"Ошибка при обработке чанков CSV: {e}")
+                return None, None, None
+                
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке большого CSV: {e}")
+            return None, None, None
+
+    def safe_csv_loading(self, csv_path, text_column='text', label_column='label', chunksize=10000):
+        """
+        Безопасная загрузка CSV с обработкой текстовых данных
+        """
+        try:
+            # Проверяем существование файла
+            if not os.path.exists(csv_path):
+                logger.error(f"Файл не найден: {csv_path}")
+                return None, None, None
+                
+            # Проверяем размер файла
+            file_size = os.path.getsize(csv_path)
+            if file_size == 0:
+                logger.error(f"Файл пустой: {csv_path}")
+                return None, None, None
+                
+            logger.info(f"Загрузка файла: {csv_path} (размер: {file_size} байт)")
+            
+            # Проверяем файл
+            total_rows = sum(1 for line in open(csv_path, encoding='utf-8')) - 1
+            logger.info(f"Всего строк в файле: {total_rows}")
+            
+            # Определяем доступные колонки
+            try:
+                sample = pd.read_csv(csv_path, nrows=5)
+                available_columns = sample.columns.tolist()
+                
+                logger.info(f"Доступные колонки: {available_columns}")
+                
+                if text_column not in available_columns:
+                    logger.warning(f"Колонка '{text_column}' не найдена, ищем альтернативы")
+                    # Ищем текстовые колонки
+                    text_candidates = sample.select_dtypes(include=['object']).columns.tolist()
+                    if text_candidates:
+                        text_column = text_candidates[0]
+                        logger.info(f"Используем колонку '{text_column}' вместо указанной")
+                    else:
+                        logger.error("Текстовые колонки не найдены")
+                        return None, None, None
+                
+                # Загружаем данные
+                X, y, vectorizer = self.load_large_csv_with_vectorization(
+                    csv_path, 
+                    text_column=text_column, 
+                    label_column=label_column if label_column in available_columns else None,
+                    chunksize=chunksize
+                )
+                
+                if X is not None:
+                    logger.info(f"Успешно загружено. Размер данных: {X.shape}")
+                    return X, y, vectorizer
+                else:
+                    logger.error("Не удалось загрузить данные")
+                    return None, None, None
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при чтении CSV файла: {e}")
+                return None, None, None
+                
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке CSV: {e}")
+            return None, None, None
+
     def get_dataset_info(self, filename: str) -> Dict[str, Any]:
         """Получить информацию о датасете с поддержкой больших файлов"""
         try:
@@ -1454,6 +1645,8 @@ class AdvancedDatasetLoader:
             logger.error(f"Ошибка получения списка датасетов: {e}")
             return []
 
+
+        
 # =============================================================================
 # ОБНОВЛЕННЫЙ КЛАСС ДЛЯ ОБУЧЕНИЯ С ДАТАСЕТАМИ
 # =============================================================================
@@ -1724,6 +1917,35 @@ class LearningDataset(Dataset):
         state, target = self.data[idx]
         return torch.FloatTensor(state), torch.FloatTensor(target)
 
+class TextGenerator:
+    """Класс для генерации текстовых ответов"""
+    
+    def __init__(self):
+        self.vocab = {}
+        self.reverse_vocab = {}
+        self.model = None
+        self.max_length = 50
+        
+    def build_vocabulary(self, texts):
+        """Построение словаря из текстов"""
+        words = set()
+        for text in texts:
+            if isinstance(text, str):
+                words.update(text.lower().split())
+        
+        self.vocab = {word: idx for idx, word in enumerate(words)}
+        self.reverse_vocab = {idx: word for word, idx in self.vocab.items()}
+        
+    def text_to_sequence(self, text):
+        """Преобразование текста в последовательность чисел"""
+        return [self.vocab.get(word, 0) for word in text.lower().split()]
+    
+    def sequence_to_text(self, sequence):
+        """Преобразование последовательности в текст"""
+        return ' '.join([self.reverse_vocab.get(idx, '') for idx in sequence if idx in self.reverse_vocab])
+    
+
+
 class SelfLearningAI:
     """Нейросеть с возможностями самообучения"""
     
@@ -1768,6 +1990,116 @@ class SelfLearningAI:
     
         self.dialogue_storage = "user_dialogues"
         os.makedirs(self.dialogue_storage, exist_ok=True)
+    
+    def _safe_length(self, data):
+        """Безопасное получение длины для любых типов данных"""
+        if hasattr(data, 'shape') and hasattr(data.shape, '__len__') and len(data.shape) > 0:
+            return data.shape[0]  # Для массивов, матриц, тензоров
+        elif hasattr(data, '__len__'):
+            return len(data)  # Для списков и других последовательностей
+        else:
+            return 0
+        
+    def add_dialogue_pair(self, question, answer):
+        """Добавление пар вопрос-ответ для обучения"""
+        self.dialogue_pairs.append((question, answer))
+        logger.info(f"Добавлена пара диалогов. Всего: {len(self.dialogue_pairs)}")
+        
+        
+    def train_dialogue_model(self, epochs=10):
+        """Обучение модели на диалогах"""
+        if not self.dialogue_pairs:
+            logger.warning("Нет данных для обучения диалоговой модели")
+            return False
+            
+        try:
+            # Собираем все тексты для словаря
+            all_texts = []
+            for question, answer in self.dialogue_pairs:
+                all_texts.extend([question, answer])
+                
+            self.text_generator.build_vocabulary(all_texts)
+            
+            # Создаем обучающие данные из пар вопрос-ответ
+            training_data = self._prepare_dialogue_training_data()
+            
+            if training_data:
+                # Обучаем модель на диалогах
+                success = self._train_on_dialogues(training_data)
+                logger.info(f"Обучение диалоговой модели: {'успешно' if success else 'не удалось'}")
+                return success
+            else:
+                logger.error("Не удалось подготовить данные для обучения диалогов")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Ошибка обучения диалоговой модели: {e}")
+            return False
+    
+    def generate_response(self, input_text, context=None):
+        """Генерация ответа на основе входного текста"""
+        try:
+            # Простая реализация - поиск похожих вопросов
+            if not self.dialogue_pairs:
+                return "Я еще учусь общаться. Задайте другой вопрос."
+                
+            # Поиск наиболее похожего вопроса
+            best_match = None
+            best_score = 0
+            
+            for question, answer in self.dialogue_pairs:
+                similarity = self._calculate_similarity(input_text, question)
+                if similarity > best_score:
+                    best_score = similarity
+                    best_match = answer
+            
+            if best_score > 0.3:  # Порог схожести
+                logger.info(f"Найден похожий вопрос (схожесть: {best_score:.2f})")
+                return best_match
+            else:
+                logger.info(f"Не найден похожий вопрос (лучшая схожесть: {best_score:.2f})")
+                return self._get_fallback_response(input_text)
+                
+        except Exception as e:
+            logger.error(f"Ошибка генерации ответа: {e}")
+            return "Извините, я пока не могу ответить на этот вопрос."
+    
+    def _calculate_similarity(self, text1, text2):
+        """Вычисление схожести двух текстов"""
+        if not text1 or not text2:
+            return 0
+            
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 or not words2:
+            return 0
+            
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        return len(intersection) / len(union) if union else 0
+    
+    def _get_fallback_response(self, input_text):
+        """Получение запасного ответа"""
+        fallback_responses = [
+            "Интересный вопрос! Пока я не могу дать точный ответ, но я учусь.",
+            "Мне нужно больше информации об этом. Можете уточнить вопрос?",
+            "Я еще изучаю эту тему. Попробуйте задать вопрос по-другому.",
+            "Пока не могу ответить на этот вопрос, но я постоянно улучшаю свои знания.",
+            "Это сложный вопрос. Я работаю над улучшением своих способностей.",
+            "Благодарю за вопрос! Я еще развиваюсь и учусь лучше понимать запросы.",
+            "Интересно! Я запомнил этот вопрос и постараюсь найти ответ для будущих бесед.",
+            "Спасибо за обращение! Мой ИИ постоянно обучается на новых вопросах."
+        ]
+        
+        # Используем хэш текста для псевдослучайного выбора
+        if input_text:
+            text_hash = hash(input_text) % len(fallback_responses)
+        else:
+            text_hash = 0
+            
+        return fallback_responses[text_hash]
     
     def save_user_dialogue(self, user_id: int, dialogue_data: List[Dict]):
         """Сохранение диалога пользователя для обучения"""
@@ -1828,12 +2160,18 @@ class SelfLearningAI:
 
     def predict(self, input_data: np.ndarray) -> np.ndarray:
         """Предсказание на основе входных данных"""
-        if len(input_data) == 0:
+        if self._safe_length(input_data) == 0:
             return np.array([])
             
         self.model.eval()
         with torch.no_grad():
-            input_tensor = torch.FloatTensor(input_data).to(self.device)
+            # Преобразуем в плотную матрицу если нужно
+            if hasattr(input_data, 'toarray'):
+                input_data_dense = input_data.toarray()
+            else:
+                input_data_dense = input_data
+                
+            input_tensor = torch.FloatTensor(input_data_dense).to(self.device)
             if len(input_tensor.shape) == 1:
                 input_tensor = input_tensor.unsqueeze(0)
             output = self.model(input_tensor)
@@ -1849,167 +2187,200 @@ class SelfLearningAI:
         return predicted_class, confidence, predictions
     
     def learn_from_data(self, X: np.ndarray, y: np.ndarray, epochs: int = 10, 
-                batch_size: int = 32, validation_data: tuple = None):
+                    batch_size: int = 32, validation_data: tuple = None):
         """Обучение на размеченных данных с исправленной обработкой ошибок"""
+        print(f"🔍 ДИАГНОСТИКА: X type: {type(X)}, has shape: {hasattr(X, 'shape')}")
+        if hasattr(X, 'shape'):
+            print(f"🔍 ДИАГНОСТИКА: X.shape: {X.shape}")
+        print(f"🔍 ДИАГНОСТИКА: y type: {type(y)}, has shape: {hasattr(y, 'shape')}")
+        if hasattr(y, 'shape'):
+            print(f"🔍 ДИАГНОСТИКА: y.shape: {y.shape}")
         
-        # ЯВНАЯ ПРОВЕРКА ДАННЫХ ВМЕСТО ТИХОГО ПРЕРЫВАНИЯ
-        if len(X) == 0 or len(y) == 0:
-            error_msg = f"❌ Пустые данные для обучения: X={len(X)}, y={len(y)}"
+        # Преобразуем ВСЕ разреженные матрицы в плотные сразу
+        if hasattr(X, 'toarray'):
+            X = X.toarray()
+            print("✅ Преобразована разреженная матрица X в плотную")
+        if hasattr(y, 'toarray'):
+            y = y.toarray() 
+            print("✅ Преобразована разреженная матрица y в плотную")
+    
+        # ЯВНАЯ ПРОВЕРКА ДАННЫХ
+        if X.shape[0] == 0 or y.shape[0] == 0:
+            error_msg = f"❌ Пустые данные для обучения: X={X.shape[0]}, y={y.shape[0]}"
             logger.error(error_msg)
             raise ValueError(error_msg)
-        
-        # ПРОВЕРКА СОВПАДЕНИЯ РАЗМЕРОВ
-        if len(X) != len(y):
-            error_msg = f"❌ Несовпадение размеров X({len(X)}) и y({len(y)})"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-        
-        # ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
-        logger.info(f"🚀 Начало обучения: {len(X)} примеров, {len(np.unique(y))} классов")
-        logger.info(f"📊 Формы данных - X: {X.shape}, y: {y.shape}")
-        logger.info(f"🎯 Уникальные классы в y: {np.unique(y)}")
-        
-        try:
-            # ПРОВЕРЯЕМ И ОБНОВЛЯЕМ РАЗМЕР ВХОДНОГО СЛОЯ ЕСЛИ НУЖНО
-            if X.shape[1] != self.input_size:
-                logger.info(f"🔄 Обновляем размер входного слоя с {self.input_size} до {X.shape[1]}")
-                self._update_input_size(X.shape[1])
+            # ЯВНАЯ ПРОВЕРКА ДАННЫХ ВМЕСТО ТИХОГО ПРЕРЫВАНИЯ
+            x_length = self._safe_length(X)
+            y_length = self._safe_length(y)
             
-            # ПРЕОБРАЗУЕМ y В ONE-HOT ЕСЛИ НУЖНО
-            y_onehot = y
-            if len(y.shape) == 1:
-                try:
-                    # Убеждаемся, что все метки в допустимом диапазоне
-                    unique_classes = len(np.unique(y))
-                    if unique_classes > self.output_size:
-                        logger.info(f"🔄 Обновляем размер выходного слоя с {self.output_size} до {unique_classes}")
-                        self._update_output_size(unique_classes)
-                    
-                    # Преобразуем в one-hot encoding
-                    y_onehot = np.eye(self.output_size)[y]
-                    logger.info(f"✅ One-hot encoded y: {y_onehot.shape}")
-                    
-                except Exception as e:
-                    error_msg = f"❌ Ошибка преобразования y в one-hot: {e}"
+            if x_length == 0 or y_length == 0:
+                error_msg = f"❌ Пустые данные для обучения: X={x_length}, y={y_length}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # ПРОВЕРКА СОВПАДЕНИЯ РАЗМЕРОВ
+            if x_length != y_length:
+                error_msg = f"❌ Несовпадение размеров X({x_length}) и y({y_length})"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
+            logger.info(f"🚀 Начало обучения: {x_length} примеров, {len(np.unique(y))} классов")
+            logger.info(f"📊 Формы данных - X: {X.shape if hasattr(X, 'shape') else 'no shape'}, y: {y.shape if hasattr(y, 'shape') else 'no shape'}")
+            logger.info(f"🎯 Уникальные классы в y: {np.unique(y)}")
+            
+            try:
+                # ПРЕОБРАЗОВАНИЕ В ПЛОТНЫЕ МАТРИЦЫ ПЕРЕД РАБОТОЙ
+                if hasattr(X, 'toarray'):
+                    X_dense = X.toarray()
+                    logger.info("✅ Преобразована разреженная матрица X в плотную")
+                else:
+                    X_dense = X
+                
+                if hasattr(y, 'toarray'):
+                    y_dense = y.toarray()
+                    logger.info("✅ Преобразована разреженная матрица y в плотную")
+                else:
+                    y_dense = y
+                
+                # ПРОВЕРЯЕМ И ОБНОВЛЯЕМ РАЗМЕР ВХОДНОГО СЛОЯ ЕСЛИ НУЖНО
+                if X_dense.shape[1] != self.input_size:
+                    logger.info(f"🔄 Обновляем размер входного слоя с {self.input_size} до {X_dense.shape[1]}")
+                    self._update_input_size(X_dense.shape[1])
+                
+                # ПРЕОБРАЗУЕМ y В ONE-HOT ЕСЛИ НУЖНО
+                y_onehot = y_dense
+                if len(y_dense.shape) == 1:
+                    try:
+                        # Убеждаемся, что все метки в допустимом диапазоне
+                        unique_classes = len(np.unique(y_dense))
+                        if unique_classes > self.output_size:
+                            logger.info(f"🔄 Обновляем размер выходного слоя с {self.output_size} до {unique_classes}")
+                            self._update_output_size(unique_classes)
+                        
+                        # Преобразуем в one-hot encoding
+                        y_onehot = np.eye(self.output_size)[y_dense]
+                        logger.info(f"✅ One-hot encoded y: {y_onehot.shape}")
+                        
+                    except Exception as e:
+                        error_msg = f"❌ Ошибка преобразования y в one-hot: {e}"
+                        logger.error(error_msg)
+                        raise ValueError(error_msg)
+                
+                # ФИНАЛЬНАЯ ПРОВЕРКА РАЗМЕРНОСТЕЙ
+                if X_dense.shape[0] != y_onehot.shape[0]:
+                    error_msg = f"❌ Несовпадение размеров после преобразования: X={X_dense.shape[0]}, y_onehot={y_onehot.shape[0]}"
                     logger.error(error_msg)
                     raise ValueError(error_msg)
-            
-            # ФИНАЛЬНАЯ ПРОВЕРКА РАЗМЕРНОСТЕЙ
-            if len(X) != len(y_onehot):
-                error_msg = f"❌ Несовпадение размеров после преобразования: X={len(X)}, y_onehot={len(y_onehot)}"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
-            
-            # СОЗДАЕМ ДАТАСЕТ И DATALOADER
-            # ИСПРАВЛЕНИЕ 1: Преобразуем данные в правильный тип
-            X_tensor = torch.FloatTensor(X)
-            y_tensor = torch.FloatTensor(y_onehot)
-            dataset = LearningDataset(list(zip(X_tensor, y_tensor)))
-            
-            # Убеждаемся, что batch_size не больше размера датасета
-            actual_batch_size = min(batch_size, len(X))
-            if actual_batch_size == 0:
-                error_msg = "❌ Размер батча равен 0"
-                logger.error(error_msg)
-                raise ValueError(error_msg)
                 
-            # ИСПРАВЛЕНИЕ 2: Убираем drop_last=True для маленьких датасетов
-            drop_last = len(X) > actual_batch_size
-            dataloader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=drop_last)
-            
-            self.model.train()
-            epoch_losses = []
-            
-            logger.info(f"🔥 Запуск обучения на {epochs} эпох, batch_size={actual_batch_size}")
-            
-            for epoch in range(epochs):
-                total_loss = 0
-                batch_count = 0
+                # СОЗДАЕМ ДАТАСЕТ И DATALOADER
+                X_tensor = torch.FloatTensor(X_dense)
+                y_tensor = torch.FloatTensor(y_onehot)
+                dataset = LearningDataset(list(zip(X_tensor, y_tensor)))
                 
-                for batch_X, batch_y in dataloader:
-                    if len(batch_X) == 0:
-                        logger.warning("⚠️ Пустой батч, пропускаем")
-                        continue
+                # Убеждаемся, что batch_size не больше размера датасета
+                actual_batch_size = min(batch_size, X_dense.shape[0])
+                if actual_batch_size == 0:
+                    error_msg = "❌ Размер батча равен 0"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
                     
-                    # ПРОВЕРЯЕМ РАЗМЕРНОСТИ
-                    if batch_X.dim() != 2:
-                        logger.warning(f"🔄 Исправляем размерность batch_X: {batch_X.shape}")
-                        batch_X = batch_X.view(batch_X.size(0), -1)
+                # Убираем drop_last=True для маленьких датасетов
+                drop_last = X_dense.shape[0] > actual_batch_size
+                dataloader = DataLoader(dataset, batch_size=actual_batch_size, shuffle=True, drop_last=drop_last)
+                
+                self.model.train()
+                epoch_losses = []
+                
+                logger.info(f"🔥 Запуск обучения на {epochs} эпох, batch_size={actual_batch_size}")
+                
+                for epoch in range(epochs):
+                    total_loss = 0
+                    batch_count = 0
                     
-                    batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+                    for batch_X, batch_y in dataloader:
+                        if batch_X.shape[0] == 0:
+                            logger.warning("⚠️ Пустой батч, пропускаем")
+                            continue
+                        
+                        # ПРОВЕРЯЕМ РАЗМЕРНОСТИ
+                        if batch_X.dim() != 2:
+                            logger.warning(f"🔄 Исправляем размерность batch_X: {batch_X.shape}")
+                            batch_X = batch_X.view(batch_X.size(0), -1)
+                        
+                        batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+                        
+                        # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА РАЗМЕРНОСТЕЙ
+                        if batch_X.shape[1] != self.input_size:
+                            # Автоматическое приведение размеров вместо пропуска
+                            if batch_X.shape[1] > self.input_size:
+                                batch_X = batch_X[:, :self.input_size]
+                            else:
+                                # Дополняем нулями
+                                padding = torch.zeros(batch_X.shape[0], self.input_size - batch_X.shape[1], device=self.device)
+                                batch_X = torch.cat([batch_X, padding], dim=1)
+                            logger.warning(f"🔄 Исправлен размер батча: {batch_X.shape}")
+                        
+                        self.optimizer.zero_grad()
+                        outputs = self.model(batch_X)
+                        
+                        # Проверка выходов модели
+                        if torch.isnan(outputs).any():
+                            logger.error("❌ Выходы модели содержат NaN значения")
+                            continue
+                        
+                        loss = self.criterion(outputs, batch_y)
+                        
+                        # Проверка значения потерь
+                        if torch.isnan(loss) or torch.isinf(loss):
+                            logger.error("❌ Потери содержат NaN или Inf значения")
+                            continue
+                        
+                        loss.backward()
+                        
+                        # Градиентный clipping для стабильности
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                        
+                        self.optimizer.step()
+                        
+                        total_loss += loss.item()
+                        batch_count += 1
                     
-                    # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА РАЗМЕРНОСТЕЙ
-                    if batch_X.shape[1] != self.input_size:
-                        # ИСПРАВЛЕНИЕ 3: Автоматическое приведение размеров вместо пропуска
-                        if batch_X.shape[1] > self.input_size:
-                            batch_X = batch_X[:, :self.input_size]
+                    if batch_count > 0:
+                        avg_loss = total_loss / batch_count
+                        epoch_losses.append(avg_loss)
+                        
+                        # ВАЛИДАЦИЯ
+                        val_accuracy = 0
+                        if validation_data:
+                            val_accuracy = self.evaluate(*validation_data)
+                            logger.info(f"📈 Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
                         else:
-                            # Дополняем нулями
-                            padding = torch.zeros(batch_X.shape[0], self.input_size - batch_X.shape[1], device=self.device)
-                            batch_X = torch.cat([batch_X, padding], dim=1)
-                        logger.warning(f"🔄 Исправлен размер батча: {batch_X.shape}")
-                    
-                    self.optimizer.zero_grad()
-                    outputs = self.model(batch_X)
-                    
-                    # ИСПРАВЛЕНИЕ 4: Проверка выходов модели
-                    if torch.isnan(outputs).any():
-                        logger.error("❌ Выходы модели содержат NaN значения")
-                        continue
-                    
-                    loss = self.criterion(outputs, batch_y)
-                    
-                    # ИСПРАВЛЕНИЕ 5: Проверка значения потерь
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        logger.error("❌ Потери содержат NaN или Inf значения")
-                        continue
-                    
-                    loss.backward()
-                    
-                    # ИСПРАВЛЕНИЕ 6: Градиентный clipping для стабильности
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                    
-                    self.optimizer.step()
-                    
-                    total_loss += loss.item()
-                    batch_count += 1
-                
-                if batch_count > 0:
-                    avg_loss = total_loss / batch_count
-                    epoch_losses.append(avg_loss)
-                    
-                    # ВАЛИДАЦИЯ
-                    val_accuracy = 0
-                    if validation_data:
-                        val_accuracy = self.evaluate(*validation_data)
-                        logger.info(f"📈 Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Val Accuracy: {val_accuracy:.4f}")
+                            logger.info(f"📈 Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
                     else:
-                        logger.info(f"📈 Эпоха {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
-                else:
-                    logger.warning(f"⚠️ Эпоха {epoch+1}: нет данных для обучения")
-                    # ИСПРАВЛЕНИЕ 7: Добавляем значение потерь даже при пустой эпохе
-                    epoch_losses.append(float('inf'))
-            
-            # СОХРАНЕНИЕ МЕТРИК
-            self.performance_metrics['loss'].extend(epoch_losses)
-            if validation_data:
-                self.performance_metrics['accuracy'].append(val_accuracy)
-            
-            # СОХРАНЕНИЕ МОДЕЛИ
-            self.save_model()
-            
-            # ИСПРАВЛЕНИЕ 8: Безопасное получение финального loss
-            final_loss = epoch_losses[-1] if epoch_losses and epoch_losses[-1] != float('inf') else 'N/A'
-            logger.info(f"✅ Обучение завершено успешно! Финальный loss: {final_loss}")
-            
-            return epoch_losses
-            
-        except Exception as e:
-            error_msg = f"❌ Критическая ошибка в learn_from_data: {e}"
-            logger.error(error_msg)
-            import traceback
-            logger.error(f"🔍 Трассировка ошибки: {traceback.format_exc()}")
-            raise
+                        logger.warning(f"⚠️ Эпоха {epoch+1}: нет данных для обучения")
+                        epoch_losses.append(float('inf'))
+                
+                # СОХРАНЕНИЕ МЕТРИК
+                self.performance_metrics['loss'].extend(epoch_losses)
+                if validation_data:
+                    self.performance_metrics['accuracy'].append(val_accuracy)
+                
+                # СОХРАНЕНИЕ МОДЕЛИ
+                self.save_model()
+                
+                # Безопасное получение финального loss
+                final_loss = epoch_losses[-1] if epoch_losses and epoch_losses[-1] != float('inf') else 'N/A'
+                logger.info(f"✅ Обучение завершено успешно! Финальный loss: {final_loss}")
+                
+                return epoch_losses
+                
+            except Exception as e:
+                error_msg = f"❌ Критическая ошибка в learn_from_data: {e}"
+                logger.error(error_msg)
+                import traceback
+                logger.error(f"🔍 Трассировка ошибки: {traceback.format_exc()}")
+                raise
 
     def _update_input_size(self, new_input_size: int):
         """Обновление размера входного слоя"""
@@ -2309,13 +2680,14 @@ class SelfLearningAI:
     
     def evaluate(self, X_test: np.ndarray, y_test: np.ndarray) -> float:
         """Оценка точности модели"""
-        if len(X_test) == 0:
+        # ИСПРАВЛЕНИЕ: Используем safe_length
+        if self._safe_length(X_test) == 0:
             return 0.0
             
         self.model.eval()
         with torch.no_grad():
             predictions = self.predict(X_test)
-            if len(predictions) == 0:
+            if self._safe_length(predictions) == 0:
                 return 0.0
                 
             predicted_classes = np.argmax(predictions, axis=1)
@@ -2359,11 +2731,471 @@ class SelfLearningAI:
         except Exception as e:
             logger.error(f"Ошибка при сохранении модели: {e}")
 
+
+class GitHubTrainingDataLoader:
+    """Специализированный загрузчик данных для обучения ИИ с GitHub"""
+    
+    def __init__(self):
+        self.training_data_dir = "training_datasets"
+        self.supported_training_formats = {
+            'json': ['.json', '.jsonl'],
+            'csv': ['.csv', '.tsv'],
+            'text': ['.txt', '.md'],
+            'parquet': ['.parquet'],
+            'pickle': ['.pkl', '.pickle']
+        }
+        os.makedirs(self.training_data_dir, exist_ok=True)
+    
+    async def download_training_repo(self, repo_url: str, target_files: List[str] = None) -> Tuple[bool, str]:
+        """Скачивание репозитория специально для обучения ИИ"""
+        try:
+            temp_dir = "temp_training_repo"
+            
+            # Улучшенная очистка временной директории
+            await self._safe_cleanup_directory(temp_dir)
+            
+            # Клонируем репозиторий
+            clone_success = await self._clone_repository(repo_url, temp_dir)
+            if not clone_success:
+                return False, "❌ Ошибка клонирования репозитория"
+            
+            # Ищем файлы для обучения
+            training_files = await self._find_training_files(temp_dir, target_files)
+            if not training_files:
+                return False, "❌ В репозитории не найдены файлы для обучения"
+            
+            # Копируем найденные файлы
+            copied_files = await self._copy_training_files(training_files, temp_dir)
+            
+            # Очистка
+            await self._safe_cleanup_directory(temp_dir)
+            
+            return True, f"✅ Скачано {len(copied_files)} файлов для обучения: {', '.join(copied_files)}"
+            
+        except Exception as e:
+            await self._safe_cleanup_directory(temp_dir)
+            return False, f"❌ Ошибка: {str(e)}"
+    
+    async def _find_training_files(self, temp_dir: str, target_files: List[str] = None) -> List[str]:
+        """Поиск файлов для обучения в репозитории"""
+        training_files = []
+        
+        for root, dirs, files in os.walk(temp_dir):
+            # Пропускаем служебные директории
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules']]
+            
+            for file in files:
+                file_path = os.path.join(root, file)
+                
+                # Проверяем формат файла
+                if self._is_training_file(file):
+                    # Если указаны целевые файлы, проверяем соответствие
+                    if target_files:
+                        if any(target in file for target in target_files):
+                            training_files.append(file_path)
+                    else:
+                        training_files.append(file_path)
+        
+        return training_files
+    
+    def _is_training_file(self, filename: str) -> bool:
+        """Проверяет, является ли файл подходящим для обучения"""
+        file_ext = os.path.splitext(filename)[1].lower()
+        
+        for format_type, extensions in self.supported_training_formats.items():
+            if file_ext in extensions:
+                return True
+        
+        # Также проверяем по имени файла
+        training_keywords = ['train', 'dataset', 'data', 'corpus', 'dialog', 'conversation']
+        filename_lower = filename.lower()
+        
+        return any(keyword in filename_lower for keyword in training_keywords)
+    
+    async def _copy_training_files(self, training_files: List[str], temp_dir: str) -> List[str]:
+        """Копирование файлов для обучения"""
+        copied_files = []
+        
+        for file_path in training_files:
+            try:
+                # Сохраняем структуру директорий
+                relative_path = os.path.relpath(file_path, temp_dir)
+                target_path = os.path.join(self.training_data_dir, relative_path)
+                
+                # Создаем целевую директорию
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                
+                # Копируем файл
+                shutil.copy2(file_path, target_path)
+                copied_files.append(relative_path)
+                
+                logger.info(f"Скопирован файл для обучения: {relative_path}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка копирования {file_path}: {e}")
+                continue
+        
+        return copied_files
+    
+    async def _safe_cleanup_directory(self, directory: str):
+        """Безопасная очистка директории"""
+        if os.path.exists(directory):
+            try:
+                # Даем время на освобождение ресурсов
+                await asyncio.sleep(1)
+                
+                # Рекурсивное удаление
+                shutil.rmtree(directory, ignore_errors=True)
+                
+                # Дополнительная проверка
+                if os.path.exists(directory):
+                    logger.warning(f"Директория {directory} все еще существует после удаления")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка очистки директории {directory}: {e}")
+    
+    async def _clone_repository(self, repo_url: str, temp_dir: str) -> bool:
+        """Клонирование репозитория с обработкой ошибок"""
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "git", "clone", "--depth", "1", repo_url, temp_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode == 0:
+                return True
+            else:
+                logger.error(f"Ошибка клонирования: {stderr.decode()}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Исключение при клонировании: {e}")
+            return False
+
+    async def validate_training_repo(self, repo_url: str) -> Dict[str, Any]:
+        """Валидация репозитория перед загрузкой"""
+        validation_result = {
+            "valid": False,
+            "reason": "",
+            "training_files_found": [],
+            "estimated_size": "0 MB"
+        }
+        
+        try:
+            temp_dir = "temp_validation"
+            
+            # Пробуем клонировать
+            clone_success = await self._clone_repository(repo_url, temp_dir)
+            if not clone_success:
+                validation_result["reason"] = "Не удалось клонировать репозиторий"
+                return validation_result
+            
+            # Ищем файлы для обучения
+            training_files = await self._find_training_files(temp_dir)
+            
+            if not training_files:
+                validation_result["reason"] = "Не найдены файлы для обучения"
+                await self._safe_cleanup_directory(temp_dir)
+                return validation_result
+            
+            # Анализируем файлы
+            total_size = 0
+            file_types = set()
+            
+            for file_path in training_files:
+                file_size = os.path.getsize(file_path)
+                total_size += file_size
+                file_ext = os.path.splitext(file_path)[1].lower()
+                file_types.add(file_ext)
+            
+            # Очистка
+            await self._safe_cleanup_directory(temp_dir)
+            
+            validation_result.update({
+                "valid": True,
+                "training_files_found": [os.path.basename(f) for f in training_files[:10]],  # Первые 10 файлов
+                "file_types": list(file_types),
+                "estimated_size": f"{total_size / (1024*1024):.1f} MB",
+                "total_files": len(training_files)
+            })
+            
+            return validation_result
+            
+        except Exception as e:
+            await self._safe_cleanup_directory(temp_dir)
+            validation_result["reason"] = f"Ошибка валидации: {str(e)}"
+            return validation_result
 # =============================================================================
 # ОБНОВЛЕННЫЙ КЛАСС SelfLearningAI С САМООБУЧЕНИЕМ ИЗ ДИАЛОГОВ
 # =============================================================================
 
 class EnhancedSelfLearningAI(SelfLearningAI):
+    """Улучшенная версия SelfLearningAI с поддержкой диалогов"""
+    
+    def __init__(self, input_size: int = 100, output_size: int = 10, 
+                 hidden_sizes: List[int] = None, learning_rate: float = 0.001):
+        
+        # Вызываем конструктор родителя
+        super().__init__(input_size, output_size, hidden_sizes, learning_rate)
+        
+        # Инициализируем атрибуты для диалогов ПЕРЕД любыми другими операциями
+        self.dialogue_pairs = []  # Должно быть первым!
+        self.text_generator = TextGenerator()
+        self.learning_from_dialogues = True
+        self.min_dialogue_length = 5
+        self.dialogue_model_trained = False
+        self.dialog_model = None
+        
+        logger.info(f"EnhancedSelfLearningAI инициализирован. dialogue_pairs: {len(self.dialogue_pairs)}")
+    
+    def add_dialogue_pair(self, question: str, answer: str):
+        """Добавление пар вопрос-ответ для обучения"""
+        try:
+            if question and answer and isinstance(question, str) and isinstance(answer, str):
+                question_clean = question.strip()
+                answer_clean = answer.strip()
+                
+                if question_clean and answer_clean:
+                    self.dialogue_pairs.append((question_clean, answer_clean))
+                    logger.debug(f"Добавлена пара диалогов. Всего: {len(self.dialogue_pairs)}")
+                else:
+                    logger.warning("Попытка добавить пустую пару диалогов")
+            else:
+                logger.warning("Некорректные данные для пары диалогов")
+                
+        except Exception as e:
+            logger.error(f"Ошибка добавления пары диалогов: {e}")
+    
+    def train_dialogue_model(self, epochs: int = 3) -> bool:
+        """Обучение модели на диалогах"""
+        try:
+            if not self.dialogue_pairs:
+                logger.warning("Нет данных для обучения диалоговой модели")
+                return False
+                
+            logger.info(f"Начало обучения диалоговой модели на {len(self.dialogue_pairs)} парах")
+            
+            # Собираем все тексты для словаря
+            all_texts = []
+            for question, answer in self.dialogue_pairs:
+                if question and answer:
+                    all_texts.extend([question, answer])
+            
+            if not all_texts:
+                logger.error("Не удалось извлечь тексты для обучения")
+                return False
+                
+            # Создаем обучающие данные
+            training_data = self._prepare_dialogue_training_data()
+            
+            if not training_data:
+                logger.error("Не удалось подготовить данные для обучения")
+                return False
+            
+            # Обучаем модель
+            success = self._train_on_dialogues(training_data, epochs)
+            
+            if success:
+                self.dialogue_model_trained = True
+                logger.info("Диалоговая модель успешно обучена")
+            else:
+                logger.warning("Обучение диалоговой модели не удалось")
+                
+            return success
+            
+        except Exception as e:
+            logger.error(f"Ошибка обучения диалоговой модели: {e}")
+            return False
+    
+    def _prepare_dialogue_training_data(self) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Подготовка данных для обучения из диалогов"""
+        training_data = []
+        
+        try:
+            for question, answer in self.dialogue_pairs:
+                if not question or not answer:
+                    continue
+                    
+                # Преобразуем тексты в числовые признаки
+                question_features = self._text_to_features(question)
+                answer_features = self._text_to_features(answer)
+                
+                # Создаем пары для обучения
+                training_data.append((question_features, answer_features))
+            
+            logger.info(f"Подготовлено {len(training_data)} примеров для обучения")
+            return training_data
+            
+        except Exception as e:
+            logger.error(f"Ошибка подготовки данных для обучения: {e}")
+            return []
+    
+    def _text_to_features(self, text: str) -> np.ndarray:
+        """Преобразование текста в числовые признаки"""
+        try:
+            if not text or not isinstance(text, str):
+                return np.zeros(100)
+                
+            words = text.lower().split()
+            feature_vector = np.zeros(100)  # Фиксированный размер признаков
+            
+            for i, word in enumerate(words[:100]):  # Ограничиваем длину
+                if word:
+                    hash_val = hash(word) % 10000 / 10000.0
+                    feature_vector[i % 100] += hash_val
+            
+            # Нормализация
+            norm = np.linalg.norm(feature_vector)
+            if norm > 0:
+                feature_vector = feature_vector / norm
+            
+            return feature_vector
+            
+        except Exception as e:
+            logger.error(f"Ошибка преобразования текста в признаки: {e}")
+            return np.zeros(100)
+    
+    def _train_on_dialogues(self, training_data: List[Tuple[np.ndarray, np.ndarray]], epochs: int = 3) -> bool:
+        """Обучение на диалогах"""
+        try:
+            if not training_data:
+                logger.error("Нет данных для обучения")
+                return False
+                
+            # Подготавливаем данные для обучения
+            X = np.array([pair[0] for pair in training_data])
+            y = np.array([pair[1] for pair in training_data])
+            
+            if len(X) == 0 or len(y) == 0:
+                logger.error("Пустые данные после преобразования")
+                return False
+            
+            logger.info(f"Обучение на {len(X)} примерах, размерность X: {X.shape}")
+            
+            # Обучаем модель с небольшим количеством эпох
+            losses = self.learn_from_data(X, y, epochs=epochs, batch_size=min(8, len(X)))
+            
+            success = losses is not None and len(losses) > 0
+            logger.info(f"Обучение завершено: {'успешно' if success else 'не удалось'}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Ошибка при обучении на диалогах: {e}")
+            return False
+    
+    def generate_response(self, input_text: str, context: List[Dict] = None) -> str:
+        """Генерация ответа на основе входного текста"""
+        try:
+            if not input_text or not isinstance(input_text, str):
+                return "Пожалуйста, задайте ваш вопрос."
+                
+            input_text_clean = input_text.strip()
+            if not input_text_clean:
+                return "Я не понял ваш вопрос. Можете переформулировать?"
+                
+            # Простая реализация - поиск похожих вопросов
+            if not self.dialogue_pairs:
+                return "Я еще учусь общаться. Задайте другой вопрос."
+                
+            # Поиск наиболее похожего вопроса
+            best_match = None
+            best_score = 0
+            best_question = None
+            
+            for question, answer in self.dialogue_pairs:
+                if not question or not answer:
+                    continue
+                    
+                similarity = self._calculate_similarity(input_text_clean, question)
+                if similarity > best_score:
+                    best_score = similarity
+                    best_match = answer
+                    best_question = question
+            
+            logger.info(f"Лучшая схожесть для '{input_text_clean}': {best_score:.2f}")
+            
+            if best_score > 0.3:  # Порог схожести
+                return best_match
+            else:
+                return self._get_fallback_response(input_text_clean)
+                
+        except Exception as e:
+            logger.error(f"Ошибка генерации ответа: {e}")
+            return "Извините, я пока не могу ответить на этот вопрос."
+    
+    def _calculate_similarity(self, text1: str, text2: str) -> float:
+        """Вычисление схожести двух текстов"""
+        try:
+            if not text1 or not text2:
+                return 0.0
+                
+            words1 = set(text1.lower().split())
+            words2 = set(text2.lower().split())
+            
+            if not words1 or not words2:
+                return 0.0
+                
+            intersection = words1.intersection(words2)
+            union = words1.union(words2)
+            
+            similarity = len(intersection) / len(union) if union else 0.0
+            return similarity
+            
+        except Exception as e:
+            logger.error(f"Ошибка вычисления схожести: {e}")
+            return 0.0
+    
+    def _get_fallback_response(self, input_text: str) -> str:
+        """Получение запасного ответа"""
+        fallback_responses = [
+            "Интересный вопрос! Пока я не могу дать точный ответ, но я учусь.",
+            "Мне нужно больше информации об этом. Можете уточнить вопрос?",
+            "Я еще изучаю эту тему. Попробуйте задать вопрос по-другому.",
+            "Пока не могу ответить на этот вопрос, но я постоянно улучшаю свои знания.",
+            "Это сложный вопрос. Я работаю над улучшением своих способностей.",
+            "Благодарю за вопрос! Я еще развиваюсь и учусь лучше понимать запросы.",
+            "Интересно! Я запомнил этот вопрос и постараюсь найти ответ для будущих бесед.",
+            "Спасибо за обращение! Мой ИИ постоянно обучается на новых вопросах."
+        ]
+        
+        try:
+            # Используем хэш текста для псевдослучайного выбора
+            if input_text:
+                text_hash = hash(input_text) % len(fallback_responses)
+            else:
+                text_hash = 0
+                
+            return fallback_responses[text_hash]
+            
+        except Exception as e:
+            logger.error(f"Ошибка выбора запасного ответа: {e}")
+            return "Спасибо за вопрос! Я еще учусь и обязательно научусь отвечать на такие вопросы."
+    
+    def get_dialogue_stats(self) -> Dict[str, Any]:
+        """Получить статистику по диалогам"""
+        return {
+            "total_pairs": len(self.dialogue_pairs),
+            "learning_enabled": self.learning_from_dialogues,
+            "min_dialogue_length": self.min_dialogue_length,
+            "model_trained": self.dialogue_model_trained
+        }
+    
+    def load_dialogue_pairs(self, pairs: List[Tuple[str, str]]):
+        """Загрузка пар диалогов из внешнего источника"""
+        try:
+            if pairs and isinstance(pairs, list):
+                for question, answer in pairs:
+                    self.add_dialogue_pair(question, answer)
+                logger.info(f"Загружено {len(pairs)} пар диалогов")
+            else:
+                logger.warning("Некорректные данные для загрузки диалогов")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки пар диалогов: {e}")
+
     async def learn_from_user_dialogues(self, user_id: int = None):
         """Самообучение из сохраненных диалогов пользователей"""
         try:
@@ -2389,7 +3221,7 @@ class EnhancedSelfLearningAI(SelfLearningAI):
                 return False, f"Недостаточно данных для обучения. Нужно минимум {self.min_dialogue_length} сообщений"
             
             # Группируем диалоги по пользователям и сессиям
-            training_data = self._prepare_dialogue_training_data(all_dialogues)
+            training_data = self._prepare_dialogue_training_data_from_storage(all_dialogues)
             
             if not training_data:
                 return False, "Не удалось подготовить данные для обучения"
@@ -2434,52 +3266,8 @@ class EnhancedSelfLearningAI(SelfLearningAI):
             logger.error(f"Ошибка самообучения из диалогов: {e}")
             return False, f"❌ Ошибка самообучения: {str(e)}"
     
-    async def learn_from_user_dialogues(self, user_id: int = None):
-        """Самообучение из сохраненных диалогов пользователей"""
-        try:
-            if not self.learning_from_dialogues:
-                return False, "Обучение из диалогов отключено"
-            
-            # Собираем все диалоги
-            all_dialogues = []
-            for filename in os.listdir(self.dialogue_storage):
-                if filename.endswith('.jsonl'):
-                    filepath = os.path.join(self.dialogue_storage, filename)
-                    try:
-                        with open(filepath, 'r', encoding='utf-8') as f:
-                            for line in f:
-                                if line.strip():
-                                    dialogue = json.loads(line.strip())
-                                    if user_id is None or dialogue.get('user_id') == user_id:
-                                        all_dialogues.append(dialogue)
-                    except Exception as e:
-                        logger.error(f"Ошибка чтения файла диалога {filename}: {e}")
-            
-            if len(all_dialogues) < self.min_dialogue_length:
-                return False, f"Недостаточно данных для обучения. Нужно минимум {self.min_dialogue_length} сообщений"
-            
-            # Группируем диалоги по пользователям и сессиям
-            training_data = self._prepare_dialogue_training_data(all_dialogues)
-            
-            if not training_data:
-                return False, "Не удалось подготовить данные для обучения"
-            
-            # Обучаем модель
-            success = self._train_on_dialogues(training_data)
-            
-            if success:
-                # Очищаем старые диалоги после успешного обучения
-                self._cleanup_old_dialogues()
-                return True, f"✅ Самообучение завершено! Обработано {len(training_data)} диалогов"
-            else:
-                return False, "❌ Ошибка при обучении на диалогах"
-                
-        except Exception as e:
-            logger.error(f"Ошибка самообучения из диалогов: {e}")
-            return False, f"❌ Ошибка самообучения: {str(e)}"
-    
-    def _prepare_dialogue_training_data(self, dialogues: List[Dict]) -> List[Tuple[str, str]]:
-        """Подготовка данных для обучения из диалогов"""
+    def _prepare_dialogue_training_data_from_storage(self, dialogues: List[Dict]) -> List[Tuple[str, str]]:
+        """Подготовка данных для обучения из сохраненных диалогов"""
         training_pairs = []
         
         # Группируем по пользователям и временным меткам
@@ -2515,59 +3303,6 @@ class EnhancedSelfLearningAI(SelfLearningAI):
                     ))
         
         return training_pairs
-    
-    async def _train_on_dialogues(self, update: Update, context: ContextTypes.DEFAULT_TYPE, dataset_name: str = None):
-        """Обучение модели на диалогах с исправленной обработкой данных"""
-        try:
-            query = update.callback_query
-            if query:
-                await query.answer()
-                message = query.message
-            else:
-                message = update.message
-
-            # Показываем сообщение о начале обучения
-            status_message = await message.reply_text("🔄 Начинаю обучение на диалогах...")
-
-            # Загружаем датасет
-            dataset_path = os.path.join('training_data', dataset_name) if dataset_name else 'training_data/dialogs'
-            
-            if not os.path.exists(dataset_path):
-                await status_message.edit_text("❌ Датасет диалогов не найден")
-                return
-
-            # Загружаем и предобрабатываем данные
-            dialogs = await self.load_and_preprocess_dialogs(dataset_path)
-            
-            if not dialogs:
-                await status_message.edit_text("❌ Не удалось загрузить диалоги")
-                return
-
-            await status_message.edit_text(f"📊 Загружено {len(dialogs)} диалогов. Начинаю обучение...")
-
-            # Создаем модель если нужно
-            if not hasattr(self, 'dialog_model'):
-                self.dialog_model = await self.create_dialog_model()
-
-            # Обучаем модель
-            success = await self.train_dialog_model(dialogs, status_message)
-
-            if success:
-                await status_message.edit_text(
-                    "✅ Обучение на диалогах завершено успешно!\n"
-                    f"• Обучено диалогов: {len(dialogs)}\n"
-                    f"• Модель готова к использованию",
-                    parse_mode='Markdown'
-                )
-            else:
-                await status_message.edit_text("❌ Обучение не удалось")
-
-        except Exception as e:
-            logger.error(f"Ошибка обучения на диалогах: {e}")
-            error_msg = f"❌ Ошибка обучения: {str(e)}"
-            if "multi-target not supported" in str(e):
-                error_msg += "\n\n🔧 Проблема: неверный формат данных обучения"
-            await message.reply_text(error_msg)
 
     async def load_and_preprocess_dialogs(self, dataset_path: str) -> list:
         """Загрузка и предобработка диалогов"""
@@ -2646,8 +3381,7 @@ class EnhancedSelfLearningAI(SelfLearningAI):
         """Создание модели для диалогов"""
         try:
             # Простая модель на основе трансформеров или RNN
-            import torch
-            import torch.nn as nn
+            
             
             class SimpleDialogModel(nn.Module):
                 def __init__(self, vocab_size=10000, embedding_dim=128, hidden_dim=256):
@@ -2781,21 +3515,22 @@ class EnhancedSelfLearningAI(SelfLearningAI):
         except Exception as e:
             logger.error(f"Ошибка обучения модели: {e}")
             return False
-        def _cleanup_old_dialogues(self, days_old: int = 7):
-            """Очистка старых диалогов"""
-            try:
-                cutoff_date = datetime.now().timestamp() - (days_old * 24 * 60 * 60)
+
+    def _cleanup_old_dialogues(self, days_old: int = 7):
+        """Очистка старых диалогов"""
+        try:
+            cutoff_date = datetime.now().timestamp() - (days_old * 24 * 60 * 60)
+            
+            for filename in os.listdir(self.dialogue_storage):
+                filepath = os.path.join(self.dialogue_storage, filename)
                 
-                for filename in os.listdir(self.dialogue_storage):
-                    filepath = os.path.join(self.dialogue_storage, filename)
+                # Для файлов проверяем время изменения
+                if os.path.getmtime(filepath) < cutoff_date:
+                    os.remove(filepath)
+                    logger.info(f"Удален старый файл диалогов: {filename}")
                     
-                    # Для файлов проверяем время изменения
-                    if os.path.getmtime(filepath) < cutoff_date:
-                        os.remove(filepath)
-                        logger.info(f"Удален старый файл диалогов: {filename}")
-                        
-            except Exception as e:
-                logger.error(f"Ошибка очистки старых диалогов: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка очистки старых диалогов: {e}")
 
 # =============================================================================
 # КЛАСС AdvancedAIAssistant
@@ -2838,7 +3573,39 @@ class EnhancedAIAssistant:
         
         # Инициализация менеджера датасетов
         self.dataset_manager = DatasetManager()
+        self._load_base_dialogues()
     
+    def _load_base_dialogues(self):
+        """Загрузка базовых диалогов для обучения"""
+        try:
+            base_dialogues = [
+                ("привет", "Привет! Как я могу вам помочь?"),
+                ("здравствуйте", "Здравствуйте! Рад вас видеть. Чем могу помочь?"),
+                ("как дела", "У меня все отлично! Я готов помочь вам с учебными вопросами."),
+                ("что ты умеешь", "Я могу помочь с учебными материалами, ответить на вопросы и помочь с обучением."),
+                ("спасибо", "Пожалуйста! Обращайтесь, если понадобится помощь."),
+                ("благодарю", "Всегда рад помочь! Удачи в учебе!"),
+                ("пока", "До свидания! Удачи в учебе!"),
+                ("до свидания", "До свидания! Возвращайтесь, если будут вопросы."),
+                ("помощь", "Я могу помочь вам с предметами, расписанием и учебными материалы."),
+                ("что можно сделать", "Вы можете просмотреть предметы, расписание, полезную информацию или пообщаться со мной."),
+            ]
+            
+            # Загружаем диалоги
+            self.self_learning_ai.load_dialogue_pairs(base_dialogues)
+            
+            # Обучаем модель на базовых диалогах
+            success = self.self_learning_ai.train_dialogue_model(epochs=2)
+            
+            if success:
+                logger.info("Базовая диалоговая модель успешно обучена")
+            else:
+                logger.warning("Не удалось обучить базовую диалоговую модель")
+                
+        except Exception as e:
+            logger.error(f"Ошибка загрузки базовых диалогов: {e}")
+
+
     def _check_and_perform_learning(self):
         """Проверить и выполнить самообучение если нужно"""
         try:
@@ -2915,76 +3682,109 @@ class EnhancedAIAssistant:
     def _generate_self_learning_response(self, user_message: str, history: List[Dict]) -> str:
         """Генерация ответа с помощью SelfLearningAI"""
         try:
-            # Пытаемся использовать датасет классификатор для лучшего понимания темы
-            dataset_category, dataset_confidence = self.self_learning_ai.dataset_predict(user_message)
-            
-            conversation_text = " ".join([msg["content"] for msg in history[-3:]] + [user_message])
-            features = self._text_to_features(conversation_text)
-            
-            prediction = self.self_learning_ai.predict(features.reshape(1, -1))
-            if len(prediction) == 0:
-                return "Я еще учусь отвечать на вопросы. Можете переформулировать ваш запрос?"
-                
-            predicted_class = np.argmax(prediction[0])
-            confidence = np.max(prediction[0])
-            
-            responses = [
-                "Я могу помочь вам с учебными вопросами. Что именно вас интересует?",
-                "Похоже, у вас вопрос по учебному материалу. Могу ли я помочь?",
-                "Я специализируюсь на помощи студентам. Задайте ваш вопрос!",
-                "Для лучшей помощи уточните ваш вопрос по конкретному предмету.",
-                "Я могу объяснить сложные темы или помочь с подготовкой к экзаменам.",
-                "Если у вас есть конкретный вопрос по лекции или практике, я постараюсь помочь.",
-                "Могу помочь структурировать информацию или подготовить конспект.",
-                "Для решения учебных задач лучше обратиться к конкретным материалам курса.",
-                "Я здесь, чтобы помочь с учебными вопросами любого уровня сложности.",
-                "Не стесняйтесь задавать вопросы - я постараюсь дать полезный ответ."
-            ]
-            
-            if confidence > 0.3 and predicted_class < len(responses):
-                base_response = responses[predicted_class]
-            else:
-                base_response = "Я еще учусь отвечать на вопросы. Можете переформулировать ваш запрос?"
+            # Используем улучшенную генерацию текста
+            response = self.self_learning_ai.generate_response(user_message)
             
             # Обогащаем ответ на основе ключевых слов
-            if any(word in user_message.lower() for word in ['лекция', 'лекции']):
-                base_response += "\n\n📚 Вы можете найти лекции в разделе 'Предметы'."
-            elif any(word in user_message.lower() for word in ['практическая', 'практика']):
-                base_response += "\n\n📝 Практические работы также доступны в разделе 'Предметы'."
-            elif any(word in user_message.lower() for word in ['помощь', 'помоги']):
-                base_response += "\n\n👤 Для персональной помощи обратитесь к нашему помощнику в соответствующем разделе."
+            response = self._enhance_response(response, user_message)
             
-            return base_response
+            # Сохраняем пару вопрос-ответ для будущего обучения
+            self.self_learning_ai.add_dialogue_pair(user_message, response)
+            
+            # Периодическое обучение (каждые 10 новых пар)
+            if len(self.self_learning_ai.dialogue_pairs) % 10 == 0:
+                logger.info("Запуск периодического обучения на новых диалогах")
+                self.self_learning_ai.train_dialogue_model()
+            
+            return response
             
         except Exception as e:
             logger.error(f"Ошибка генерации ответа SelfLearningAI: {e}")
             return "Извините, возникла техническая ошибка. Попробуйте задать вопрос позже."
+
+    def _enhance_response(self, base_response: str, user_message: str) -> str:
+        """Обогащение ответа на основе ключевых слов"""
+        user_message_lower = user_message.lower()
+        
+        enhancements = []
+        
+        if any(word in user_message_lower for word in ['лекция', 'лекции']):
+            enhancements.append("📚 Вы можете найти лекции в разделе 'Предметы'.")
+        
+        if any(word in user_message_lower for word in ['практическая', 'практика']):
+            enhancements.append("📝 Практические работы также доступны в разделе 'Предметы'.")
+        
+        if any(word in user_message_lower for word in ['расписание']):
+            enhancements.append("📅 Расписание доступно в соответствующем разделе.")
+        
+        if any(word in user_message_lower for word in ['помощь', 'помоги']):
+            enhancements.append("👤 Для персональной помощи обратитесь к нашему помощнику.")
+        
+        if any(word in user_message_lower for word in ['предмет', 'предметы']):
+            enhancements.append("📖 Все доступные предметы можно найти в разделе 'Предметы'.")
+        
+        if enhancements:
+            return base_response + "\n\n" + "\n".join(enhancements)
+        
+        return base_response
+
+    def _enhance_response(self, base_response: str, user_message: str) -> str:
+        """Обогащение ответа на основе ключевых слов"""
+        user_message_lower = user_message.lower()
+        
+        enhancements = []
+        
+        if any(word in user_message_lower for word in ['лекция', 'лекции']):
+            enhancements.append("📚 Вы можете найти лекции в разделе 'Предметы'.")
+        
+        if any(word in user_message_lower for word in ['практическая', 'практика']):
+            enhancements.append("📝 Практические работы также доступны в разделе 'Предметы'.")
+        
+        if any(word in user_message_lower for word in ['расписание']):
+            enhancements.append("📅 Расписание доступно в соответствующем разделе.")
+        
+        if any(word in user_message_lower for word in ['помощь', 'помоги']):
+            enhancements.append("👤 Для персональной помощи обратитесь к нашему помощнику.")
+        
+        if enhancements:
+            return base_response + "\n\n" + "\n".join(enhancements)
+        
+        return base_response
     
-    async def get_ai_response(self, user_id: int, message: str) -> Tuple[str, bool, str]:
-        """
-        Получить ответ от ИИ с сохранением диалога для обучения
-        """
+    async def learn_from_conversation(self, user_id: int, user_message: str, ai_response: str):
+        """Обучение на основе диалога с пользователем"""
         try:
-            # Получаем ответ как обычно
+            # Добавляем пару вопрос-ответ
+            self.self_learning_ai.add_dialogue_pair(user_message, ai_response)
+            
+            # Периодически переобучаем модель
+            conversation_count = len(self.self_learning_ai.dialogue_pairs)
+            if conversation_count % 10 == 0:  # Каждые 10 диалогов
+                self.self_learning_ai.train_dialogue_model()
+                
+            logger.info(f"Добавлен диалог для обучения. Всего пар: {conversation_count}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка обучения на диалоге: {e}")
+
+    async def get_ai_response(self, user_id: int, message: str) -> Tuple[str, bool, str]:
+        """Получить ответ от ИИ"""
+        try:
             history = self.get_conversation_history(user_id)
+            
+            # Генерируем ответ
             ai_response = self._generate_self_learning_response(message, history)
             
-            # Сохраняем диалог для обучения
-            self.self_learning_ai.save_user_dialogue(user_id, history + [
-                {"role": "user", "content": message},
-                {"role": "assistant", "content": ai_response}
-            ])
+            # Обучаемся на этом диалоге
+            await self.learn_from_conversation(user_id, message, ai_response)
             
             # Обновляем историю
             self.update_conversation_history(user_id, message, ai_response)
             
-            # Периодическое самообучение
-            self._check_and_perform_learning()
-            
             return ai_response, True, "EnhancedSelfLearningAI"
             
         except Exception as e:
-            logger.error(f"Ошибка в улучшенном ИИ-помощнике: {e}")
+            logger.error(f"Ошибка в ИИ-помощнике: {e}")
             return "❌ Временно проблемы с ИИ-помощником. Попробуйте позже.", False, "Error"
     
     async def force_learning_from_dialogues(self, user_id: int = None) -> Tuple[bool, str]:
@@ -3013,6 +3813,28 @@ class EnhancedAIAssistant:
             "total_messages": total_messages,
             "model_trained": model_trained,
             "is_configured": True
+        }
+
+    def get_stats(self) -> Dict:
+        """Получить статистику использования ИИ"""
+        total_conversations = len(self.conversation_cache)
+        total_messages = sum(len(history) for history in self.conversation_cache.values())
+        
+        # Получаем статистику диалогов
+        dialogue_stats = self.self_learning_ai.get_dialogue_stats()
+        
+        # Проверяем наличие обученной модели
+        model_trained = os.path.exists("self_learning_model.pth")
+        
+        return {
+            "current_model": "EnhancedSelfLearningAI",
+            "available_models": ["EnhancedSelfLearningAI"],
+            "total_users": total_conversations,
+            "total_messages": total_messages,
+            "model_trained": model_trained,
+            "is_configured": True,
+            "dialogue_pairs": dialogue_stats["total_pairs"],
+            "learning_enabled": dialogue_stats["learning_enabled"]
         }
 
     async def train_on_dataset(self, dataset_filename: str) -> Tuple[bool, str]:
@@ -4392,7 +5214,27 @@ class EnhancedLectureBot:
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на кнопки с исправленными обработчиками"""
         query = update.callback_query
-        await query.answer()
+        
+        # Обработка возможной ошибки "Query is too old"
+        try:
+            await query.answer()
+        except telegram.error.BadRequest as e:
+            if "Query is too old" in str(e) or "query id is invalid" in str(e):
+                logger.warning(f"Callback query expired: {e}")
+                # Можно попробовать отправить сообщение пользователю
+                try:
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text="⚠️ Время действия кнопки истекло. Пожалуйста, обновите меню командой /start"
+                    )
+                except Exception as send_error:
+                    logger.error(f"Failed to send timeout message: {send_error}")
+                return  # Прерываем выполнение для просроченных запросов
+            else:
+                # Другие ошибки BadRequest
+                logger.error(f"BadRequest in button_handler: {e}")
+                return
+        
         data = query.data
         
         try:
@@ -4593,14 +5435,20 @@ class EnhancedLectureBot:
                 await self.view_all_datasets(query, context)
             else:
                 logger.warning(f"Неизвестный callback_data: {data}")
-                await query.answer("❌ Команда не распознана", show_alert=True)
+                await query.edit_message_text("❌ Команда не распознана")
                 
         except (ValueError, IndexError) as e:
             logger.error(f"Ошибка обработки callback_data '{data}': {e}")
-            await query.answer("❌ Ошибка обработки команды", show_alert=True)
+            try:
+                await query.edit_message_text("❌ Ошибка обработки команды")
+            except Exception as edit_error:
+                logger.error(f"Failed to edit message: {edit_error}")
         except Exception as e:
             logger.error(f"Неожиданная ошибка в button_handler: {e}")
-            await query.answer("❌ Произошла ошибка", show_alert=True)
+            try:
+                await query.edit_message_text("❌ Произошла ошибка при обработке команды")
+            except Exception as edit_error:
+                logger.error(f"Failed to edit error message: {edit_error}")
 
     async def manage_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Управление полезной информацией (админ)"""
@@ -6121,16 +6969,69 @@ class EnhancedLectureBot:
             )
 
     def run_bot(self):
-        """Запуск бота"""
-        logger.info("Бот запускается")
-        try:
-            self.application.run_polling(
-                drop_pending_updates=True,
-                timeout=60,
-            )
-        except Exception as e:
-            logger.error(f"Ошибка в run_polling: {e}")
-            raise
+        """Запуск бота с улучшенной обработкой сетевых ошибок"""
+        attempt = 0
+        max_attempts = 10
+        base_delay = 5  # начальная задержка в секундах
+        
+        while attempt < max_attempts:
+            try:
+                logger.info(f"🔄 Попытка запуска бота №{attempt + 1}")
+                
+                # Проверка токена
+                if not BOT_TOKEN or BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
+                    logger.error("❌ Не настроен BOT_TOKEN")
+                    break
+                    
+                # Настройка приложения с таймаутами
+                builder = Application.builder().token(BOT_TOKEN)
+                
+                # Увеличенные таймауты для нестабильных соединений
+                builder = builder.pool_timeout(30) \
+                                .connect_timeout(30) \
+                                .read_timeout(30) \
+                                .write_timeout(30)
+                
+                self.application = builder.build()
+                self.setup_handlers()
+                
+                logger.info("✅ Бот инициализирован, начинаем опрос...")
+                
+                # Запуск с обработкой сетевых ошибок
+                self.application.run_polling(
+                    drop_pending_updates=True,
+                    timeout=60,
+                    allowed_updates=['message', 'callback_query', 'chat_member']
+                )
+                break
+                
+            except httpx.ConnectError as e:
+                attempt += 1
+                delay = base_delay * attempt  # Экспоненциальная задержка
+                logger.error(f"❌ Ошибка подключения (попытка {attempt}/{max_attempts}): {e}")
+                logger.info(f"⏳ Повторная попытка через {delay} секунд...")
+                time.sleep(delay)
+                
+            except telegram.error.NetworkError as e:
+                attempt += 1
+                delay = base_delay * attempt
+                logger.error(f"❌ Сетевая ошибка (попытка {attempt}/{max_attempts}): {e}")
+                logger.info(f"⏳ Повторная попытка через {delay} секунд...")
+                time.sleep(delay)
+                
+            except telegram.error.TimedOut as e:
+                attempt += 1
+                delay = base_delay * attempt
+                logger.error(f"❌ Таймаут подключения (попытка {attempt}/{max_attempts}): {e}")
+                logger.info(f"⏳ Повторная попытка через {delay} секунд...")
+                time.sleep(delay)
+                
+            except Exception as e:
+                logger.error(f"❌ Неожиданная ошибка: {e}")
+                break
+        
+        if attempt >= max_attempts:
+            logger.error("❌ Достигнут лимит попыток подключения. Бот остановлен.")
 
     async def shutdown(self):
         """Закрытие ресурсов при завершении работы"""
@@ -8358,8 +9259,24 @@ def main():
     while attempt < max_attempts:
         try:
             logger.info(f"Попытка запуска улучшенного бота №{attempt + 1}")
+            
+            # Проверяем инициализацию
+            logger.info("Инициализация EnhancedLectureBot...")
             bot = EnhancedLectureBot()
-            bot.run_bot()
+            
+            # Проверяем, что все компоненты инициализированы
+            if (hasattr(bot, 'ai_assistant') and 
+                hasattr(bot.ai_assistant, 'self_learning_ai') and 
+                hasattr(bot.ai_assistant.self_learning_ai, 'dialogue_pairs')):
+                
+                logger.info("Все компоненты успешно инициализированы")
+                logger.info(f"Загружено диалогов: {len(bot.ai_assistant.self_learning_ai.dialogue_pairs)}")
+                
+                bot.run_bot()
+            else:
+                logger.error("Ошибка инициализации компонентов бота")
+                raise Exception("Компоненты бота не инициализированы корректно")
+                
         except KeyboardInterrupt:
             logger.info("Бот остановлен пользователем")
             break
