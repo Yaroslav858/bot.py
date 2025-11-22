@@ -48,10 +48,11 @@ from datetime import timedelta
 from enum import Enum
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.base import BaseEstimator, TransformerMixin
+from pathlib import Path
 
 
-
-
+# Состояния для массовой загрузки
+UPLOAD_FILES, SELECT_SUBJECT, SELECT_TYPE, CONFIRM_UPLOAD = range(4)
 
 # Настройка логирования
 logging.basicConfig(
@@ -62,6 +63,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = "6895869913:AAFNEmshnKg2Dd9-GGd6q5z1ygX3gAaUqvI"
+
 ADMIN_IDS = [6424735984]
 SUPPORT_GROUP_ID = "@moto_angel1"
 
@@ -5175,7 +5177,7 @@ class EnhancedLectureBot:
         self.code_manager = BotCodeManager(self)
         self.start_time = datetime.now()
         self.file_manager = FileManager()
-        self.mass_upload_handler = MassUploadHandler(self.db, self.file_manager)
+        self.mass_upload_handler = SimpleMassUploadHandler(self.db, self.file_manager)
         self._initialize_bot()
         # Текст для помощника
         self.helper_text = "👋 Привет! Помогаю в разработке курсовых (от 2000), а также в подготовке отчетов учебных и производственных практик (от 500), проектных работ и докладов (от 200), практических заданий и конспектов (от 35). Создаю сайты (html, css, js, react, vue, django, php, nodeJS, tilda) и пишу программы (c#, pascal, python, delphia)"
@@ -5213,32 +5215,40 @@ class EnhancedLectureBot:
     
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик нажатий на кнопки с исправленными обработчиками"""
-        query = update.callback_query
-        
-        # Обработка возможной ошибки "Query is too old"
         try:
-            await query.answer()
-        except telegram.error.BadRequest as e:
-            if "Query is too old" in str(e) or "query id is invalid" in str(e):
-                logger.warning(f"Callback query expired: {e}")
-                # Можно попробовать отправить сообщение пользователю
-                try:
-                    await context.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text="⚠️ Время действия кнопки истекло. Пожалуйста, обновите меню командой /start"
-                    )
-                except Exception as send_error:
-                    logger.error(f"Failed to send timeout message: {send_error}")
-                return  # Прерываем выполнение для просроченных запросов
-            else:
-                # Другие ошибки BadRequest
-                logger.error(f"BadRequest in button_handler: {e}")
+            query = update.callback_query
+            
+            if not query:
+                logger.warning("Callback query is None")
                 return
-        
-        data = query.data
-        
-        try:
+
+            # Обработка возможной ошибки "Query is too old"
+            try:
+                await query.answer()
+            except telegram.error.BadRequest as e:
+                if "Query is too old" in str(e) or "query id is invalid" in str(e):
+                    logger.warning(f"Callback query expired: {e}")
+                    # Можно попробовать отправить сообщение пользователю
+                    try:
+                        await context.bot.send_message(
+                            chat_id=update.effective_chat.id,
+                            text="⚠️ Время действия кнопки истекло. Пожалуйста, обновите меню командой /start"
+                        )
+                    except Exception as send_error:
+                        logger.error(f"Failed to send timeout message: {send_error}")
+                    return  # Прерываем выполнение для просроченных запросов
+                else:
+                    # Другие ошибки BadRequest
+                    logger.error(f"BadRequest in button_handler: {e}")
+                    return
+            
+            data = query.data
+
             logger.info(f"Обработка callback_data: {data}")
+            
+            if data.startswith("mass_"):
+                await self.handle_mass_upload_callback(query, context)  # ПРАВИЛЬНО
+                return
             
             # Обработка основных кнопок меню
             if data == "schedule":
@@ -5328,12 +5338,11 @@ class EnhancedLectureBot:
             elif data == "upload_file":
                 await self.start_single_upload(query, context)
             elif data == "mass_upload":
-                # Используем MassUploadHandler для массовой загрузки
                 await self.mass_upload_handler.start_mass_upload_simple(query, context)
             elif data == "delete_files":
                 await self.show_delete_files_menu(query, context)
             
-            # Обработчики массовой загрузки - ДОБАВИТЬ ЭТИ СТРОКИ:
+            # Обработчики массовой загрузки
             elif data == "finish_mass_upload":
                 await self.mass_upload_handler.finish_upload(query, context)
             elif data == "mass_upload_confirm":
@@ -5450,6 +5459,109 @@ class EnhancedLectureBot:
             except Exception as edit_error:
                 logger.error(f"Failed to edit error message: {edit_error}")
 
+
+
+    def setup_handlers(self):
+        """Настройка обработчиков команд"""
+        try:
+            # Основные команды
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(CommandHandler("menu", self.show_main_menu))
+            self.application.add_handler(CommandHandler("admin", self.admin_panel))
+            self.application.add_handler(CommandHandler("cancel", self.cancel_operation))
+            self.application.add_handler(CommandHandler("ai", self.ai_chat))
+            self.application.add_handler(CommandHandler("ai_stats", self.show_ai_stats))
+            self.application.add_handler(CommandHandler("donate", self.show_donate))
+            self.application.add_handler(CommandHandler("code_manager", self.code_manager_panel))
+            self.application.add_handler(CommandHandler("force_learn", self.force_learning))
+            
+            # Обработчики массовой загрузки (ПРОСТЫЕ)
+            self.setup_simple_mass_upload_handlers()
+            
+            # Обработчики текстовых сообщений
+            self.application.add_handler(MessageHandler(
+                filters.TEXT & ~filters.COMMAND, 
+                self.handle_text_message
+            ))
+            
+            # Обработчики callback queries
+            self.application.add_handler(CallbackQueryHandler(self.button_handler))
+
+            # Fallback handler
+            self.application.add_handler(MessageHandler(
+                filters.ALL, 
+                self.fallback_handler
+            ))
+            
+            logger.info("✅ Обработчики успешно настроены")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки обработчиков: {e}")
+            raise
+
+    async def handle_mass_upload_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик файлов для массовой загрузки"""
+        try:
+            # Пытаемся обработать файл через массовую загрузку
+            handled = await self.mass_upload_handler.handle_file(update, context)
+            
+            # Если массовая загрузка не обработала файл (не активна), 
+            # передаем его обычному обработчику файлов
+            if not handled:
+                await self.handle_file_upload(update, context)
+                
+        except Exception as e:
+            logger.error(f"Ошибка обработки файла: {e}")
+            await update.message.reply_text("❌ Ошибка при обработке файла")
+
+    async def handle_mass_upload_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик callback для массовой загрузки"""
+        try:
+            # Получаем callback_query из update
+            if not hasattr(update, 'callback_query') or not update.callback_query:
+                logger.error("No callback_query in update")
+                return
+                
+            query = update.callback_query
+            
+            # Проверяем что query имеет данные
+            if not hasattr(query, 'data') or not query.data:
+                logger.error("No data in callback_query")
+                return
+                
+            data = query.data
+            logger.info(f"Mass upload callback: {data}")
+            
+            # Обработка массовой загрузки через SimpleMassUploadHandler
+            if data == "mass_upload":
+                await self.mass_upload_handler.start_upload_callback(query, context)
+            elif data == "mass_finish":
+                await self.mass_upload_handler.finish_upload(query, context)
+            elif data.startswith("mass_subject_"):
+                await self.mass_upload_handler.select_subject(query, context)
+            elif data.startswith("mass_type_"):
+                await self.mass_upload_handler.select_type(query, context)
+            elif data == "mass_confirm":
+                await self.mass_upload_handler.confirm_upload(query, context)
+            elif data in ["mass_back_subjects", "mass_back_types"]:
+                await self.mass_upload_handler.navigate_back(query, context)
+            elif data == "mass_cancel":
+                await self.mass_upload_handler.cancel_upload(query, context)
+            else:
+                await query.answer("❌ Неизвестная команда массовой загрузки")
+                
+        except Exception as e:
+            logger.error(f"Ошибка в обработчике массовой загрузки: {e}")
+            try:
+                # Пытаемся отправить сообщение об ошибке
+                if hasattr(update, 'effective_chat'):
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="❌ Ошибка при обработке массовой загрузки"
+                    )
+            except Exception as send_error:
+                logger.error(f"Failed to send error message: {send_error}")
+        
     async def manage_useful_info(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Управление полезной информацией (админ)"""
         if query.from_user.id not in ADMIN_IDS:
@@ -7549,38 +7661,20 @@ class EnhancedLectureBot:
 
     async def cancel_operation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Отмена любой операции"""
-        context.user_data.clear()
-        await self.send_message_with_cleanup(
-            update, context, 
-            "❌ Операция отменена",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_menu")]
-            ])
-        )
-
-    '''def setup_handlers(self):
-        """Настройка обработчиков команд с новыми функциями"""
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("menu", self.show_main_menu))
-        self.application.add_handler(CommandHandler("admin", self.admin_panel))
-        self.application.add_handler(CommandHandler("cancel", self.cancel_operation))
-        self.application.add_handler(CommandHandler("ai", self.ai_chat))
-        self.application.add_handler(CommandHandler("ai_stats", self.show_ai_stats))
-        self.application.add_handler(CommandHandler("donate", self.show_donate))
-        self.application.add_handler(CommandHandler("code_manager", self.code_manager_panel))
-        self.application.add_handler(CommandHandler("force_learn", self.force_learning))
+        user_id = update.effective_user.id
         
-        # Обработчики сообщений для состояний
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text_message))
-        self.application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, self.handle_file_message))
-        
-        # Обработчики callback queries
-        self.application.add_handler(CallbackQueryHandler(self.button_handler))
-
-        self.application.add_handler(MessageHandler(
-        filters.ALL, 
-        self.fallback_handler
-    ))'''
+        # Отменяем массовую загрузку если активна
+        if hasattr(self, 'mass_upload_handler') and self.mass_upload_handler.is_user_uploading(user_id):
+            await self.mass_upload_handler.cancel_upload_command(update, context)
+        else:
+            context.user_data.clear()
+            await self.send_message_with_cleanup(
+                update, context, 
+                "❌ Операция отменена",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_menu")]
+                ])
+            )
 
     async def show_helper(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Показать информацию о помощнике"""
@@ -7995,7 +8089,6 @@ class EnhancedLectureBot:
             ])
         )
 
-    
     async def admin_panel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать админ-панель"""
         if update.effective_user.id not in ADMIN_IDS:
@@ -8003,11 +8096,10 @@ class EnhancedLectureBot:
             return
         
         keyboard = [
-            [InlineKeyboardButton("🔍 Диагностика обучения", callback_data="diagnose_training")],
             [InlineKeyboardButton("📚 Управление датасетами", callback_data="manage_datasets")],
             [InlineKeyboardButton("📤 Одиночная загрузка", callback_data="upload_file")],
-            [InlineKeyboardButton("📚 Массовая загрузка", callback_data="mass_upload")],  # ← ЭТА КНОПКА
-            [InlineKeyboardButton("🗑️ Удаление файлов", callback_data="delete_files")],   # ← И ЭТА
+            [InlineKeyboardButton("📚 Массовая загрузка", callback_data="mass_upload")],
+            [InlineKeyboardButton("🗑️ Удаление файлов", callback_data="delete_files")],
             [InlineKeyboardButton("➕ Добавить предмет", callback_data="add_subject")],
             [InlineKeyboardButton("👨‍🏫 Добавить преподавателя", callback_data="add_teacher")],
             [InlineKeyboardButton("📅 Управление расписанием", callback_data="manage_schedule")],
@@ -8032,10 +8124,18 @@ class EnhancedLectureBot:
             )
 
 
-
+    
     def setup_handlers(self):
-        """Настройка обработчиков команд с исправленными фильтрами"""
+        """Настройка обработчиков команд"""
         try:
+            # ОБРАБОТЧИКИ ФАЙЛОВ ДОЛЖНЫ БЫТЬ ПЕРВЫМИ!
+            
+            # Обработчики файлов для массовой загрузки (ВЫСОКИЙ ПРИОРИТЕТ)
+            self.application.add_handler(MessageHandler(
+                filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO,
+                self.handle_mass_upload_file
+            ), group=0)
+            
             # Основные команды
             self.application.add_handler(CommandHandler("start", self.start))
             self.application.add_handler(CommandHandler("menu", self.show_main_menu))
@@ -8047,19 +8147,19 @@ class EnhancedLectureBot:
             self.application.add_handler(CommandHandler("code_manager", self.code_manager_panel))
             self.application.add_handler(CommandHandler("force_learn", self.force_learning))
             
+            # Команда массовой загрузки
+            self.application.add_handler(CommandHandler("mass_upload", self.mass_upload_handler.start_upload))
+            
+            # Обработчики callback для массовой загрузки
+            self.application.add_handler(CallbackQueryHandler(self.handle_mass_upload_callback, pattern="^mass_"))
+            
             # Обработчики текстовых сообщений
             self.application.add_handler(MessageHandler(
                 filters.TEXT & ~filters.COMMAND, 
                 self.handle_text_message
             ))
             
-            # Обработчики файлов - ИСПРАВЛЕННЫЕ ФИЛЬТРЫ
-            self.application.add_handler(MessageHandler(
-                filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO,
-                self.handle_file_message
-            ))
-            
-            # Обработчики callback queries
+            # Общий обработчик callback queries
             self.application.add_handler(CallbackQueryHandler(self.button_handler))
 
             # Fallback handler
@@ -8068,14 +8168,12 @@ class EnhancedLectureBot:
                 self.fallback_handler
             ))
             
-            # Добавляем обработчики массовой загрузки
-            #setup_mass_upload_handlers(self.application, self.mass_upload_handler)
-            
             logger.info("✅ Обработчики успешно настроены")
             
         except Exception as e:
             logger.error(f"❌ Ошибка настройки обработчиков: {e}")
             raise
+
     # =============================================================================
     # ДОБАВЛЕННЫЕ CALLBACK ОБРАБОТЧИКИ
     # =============================================================================
@@ -8254,11 +8352,27 @@ class EnhancedLectureBot:
 # Определяем состояния ВНЕ класса
 UPLOAD_FILES, SELECT_SUBJECT, SELECT_TYPE, CONFIRM_UPLOAD = range(4)
 
-class MassUploadHandler:
+# =============================================================================
+# УПРОЩЕННЫЙ РАБОЧИЙ КЛАСС MASS UPLOAD
+# =============================================================================
+
+# =============================================================================
+# ПРОСТОЙ РАБОЧИЙ КЛАСС MASS UPLOAD
+# =============================================================================
+
+# =============================================================================
+# ПРОСТОЙ РАБОЧИЙ КЛАСС MASS UPLOAD
+# =============================================================================
+
+# =============================================================================
+# ПРОСТОЙ РАБОЧИЙ КЛАСС MASS UPLOAD
+# =============================================================================
+
+class SimpleMassUploadHandler:
     def __init__(self, database, file_manager):
         self.db = database
         self.file_manager = file_manager
-        self.temp_uploads = {}
+        self.upload_sessions = {}
         
         self.SUPPORTED_EXTENSIONS = {
             'pdf', 'doc', 'docx', 'txt', 'rtf', 'odt',
@@ -8280,49 +8394,95 @@ class MassUploadHandler:
         """Проверяет поддержку расширения файла"""
         return extension in self.SUPPORTED_EXTENSIONS
 
-    async def start_mass_upload_simple(self, query, context: ContextTypes.DEFAULT_TYPE):
-        """Упрощенная массовая загрузка файлов"""
-        if query.from_user.id not in ADMIN_IDS:
-            await query.answer("❌ У вас нет доступа", show_alert=True)
+    def is_user_uploading(self, user_id: int) -> bool:
+        """Проверяет, активна ли массовая загрузка у пользователя"""
+        return user_id in self.upload_sessions
+
+    async def start_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Начало массовой загрузки"""
+        user_id = update.effective_user.id
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text("❌ У вас нет доступа к этой команде")
             return
-        
-        # Инициализация данных загрузки
-        user_id = query.from_user.id
-        self.temp_uploads[user_id] = {
+
+        # Инициализация сессии загрузки
+        self.upload_sessions[user_id] = {
             'files': [],
-            'message_id': query.message.message_id
+            'state': 'collecting_files',
+            'message_id': update.message.message_id
         }
-        
-        await query.edit_message_text(
-            "📚 Массовая загрузка файлов\n\n"
-            "Просто отправляйте файлы один за другим.\n"
-            "Когда закончите - нажмите '✅ Завершить'\n\n"
-            "❌ Для отмены используйте /cancel",
+
+        await update.message.reply_text(
+            "📚 **МАССОВАЯ ЗАГРУЗКА ФАЙЛОВ**\n\n"
+            "📎 Просто отправляйте файлы один за другим\n"
+            "✅ Когда закончите - нажмите 'Завершить загрузку!!!'\n"
+            "❌ Для отмены используйте /cancel\n\n"
+            "📋 **Поддерживаемые форматы:**\n"
+            "• Документы: PDF, DOC, DOCX, TXT\n" 
+            "• Презентации: PPT, PPTX\n"
+            "• Таблицы: XLS, XLSX, CSV\n"
+            "• Изображения: JPG, PNG, GIF\n"
+            "• Архивы: ZIP, RAR\n"
+            "• И многое другое...",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Завершить загрузку", callback_data="finish_mass_upload")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="admin_panel")]
+                [InlineKeyboardButton("✅ Завершить загрузку", callback_data="mass_finish")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="mass_cancel")]
             ])
         )
-        return UPLOAD_FILES
 
-    async def handle_file_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обработка загружаемых файлов"""
-        user_id = update.message.from_user.id
-        
-        if user_id not in self.temp_uploads:
-            await update.message.reply_text("❌ Начните загрузку заново командой /mass_upload")
-            return ConversationHandler.END
+    async def start_upload_callback(self, query, context: ContextTypes.DEFAULT_TYPE):
+        """Начало массовой загрузки из callback"""
+        user_id = query.from_user.id
+        if user_id not in ADMIN_IDS:
+            await query.answer("❌ У вас нет доступа", show_alert=True)
+            return
 
-        upload_data = self.temp_uploads[user_id]
+        # Инициализация сессии загрузки
+        self.upload_sessions[user_id] = {
+            'files': [],
+            'state': 'collecting_files',
+            'message_id': query.message.message_id
+        }
+
+        await query.edit_message_text(
+            "📚 **МАССОВАЯ ЗАГРУЗКА ФАЙЛОВ**\n\n"
+            "📎 Просто отправляйте файлы один за другим\n"
+            "✅ Когда закончите - нажмите 'Завершить загрузку'\n"
+            "❌ Для отмены используйте /cancel\n\n"
+            "📋 **Поддерживаемые форматы:**\n"
+            "• Документы: PDF, DOC, DOCX, TXT\n" 
+            "• Презентации: PPT, PPTX\n"
+            "• Таблицы: XLS, XLSX, CSV\n"
+            "• Изображения: JPG, PNG, GIF\n"
+            "• Архивы: ZIP, RAR\n"
+            "• И многое другое...",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Завершить загрузку", callback_data="mass_finish")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="mass_cancel")]
+            ])
+        )
+
+    async def handle_file(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработка файла в массовой загрузке"""
+        user_id = update.effective_user.id
         
-        # Определяем тип файла и получаем информацию
+        # Проверяем, активна ли массовая загрузка
+        if not self.is_user_uploading(user_id):
+            # Если массовая загрузка не активна, передаем файл обычному обработчику
+            return False
+
+        upload_data = self.upload_sessions[user_id]
+        
+        # Определяем тип файла
         file_info = None
         file_name = ""
         file_extension = ""
         
         if update.message.document:
             file_info = update.message.document
-            file_name = file_info.file_name
+            file_name = file_info.file_name or f"document_{file_info.file_id}"
             file_extension = self._get_file_extension(file_name)
         elif update.message.photo:
             file_info = update.message.photo[-1]
@@ -8338,7 +8498,7 @@ class MassUploadHandler:
             file_extension = self._get_file_extension(file_name) or "mp3"
         else:
             await update.message.reply_text("❌ Этот тип файла не поддерживается")
-            return UPLOAD_FILES
+            return True
 
         # Проверяем расширение
         if not self._is_extension_supported(file_extension):
@@ -8346,7 +8506,7 @@ class MassUploadHandler:
                 f"❌ Файл '{file_name}' не поддерживается!\n"
                 f"Расширение .{file_extension} не разрешено."
             )
-            return UPLOAD_FILES
+            return True
 
         # Добавляем файл в список
         upload_data['files'].append({
@@ -8359,126 +8519,158 @@ class MassUploadHandler:
 
         file_count = len(upload_data['files'])
         await update.message.reply_text(
-            f"✅ Файл '{file_name}' добавлен!\n"
+            f"✅ Файл добавлен: `{file_name}`\n"
             f"📊 Всего файлов: {file_count}\n\n"
-            f"Продолжайте отправлять файлы или нажмите '✅ Завершить'"
+            "Продолжайте отправлять файлы или нажмите 'Завершить'",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Завершить загрузку", callback_data="mass_finish")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="mass_cancel")]
+            ])
         )
-
-        return UPLOAD_FILES
+        
+        return True
 
     async def finish_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Завершение загрузки и выбор предмета"""
         user_id = query.from_user.id
-        upload_data = self.temp_uploads.get(user_id)
         
-        if not upload_data or not upload_data['files']:
+        if not self.is_user_uploading(user_id):
+            await query.answer("❌ Нет активной массовой загрузки", show_alert=True)
+            return
+
+        upload_data = self.upload_sessions[user_id]
+        
+        if not upload_data['files']:
             await query.answer("❌ Нет файлов для загрузки", show_alert=True)
-            return UPLOAD_FILES
+            return
 
         # Получаем список предметов
         subjects = self.db.get_all_subjects()
         if not subjects:
             await query.answer("❌ Нет доступных предметов", show_alert=True)
-            return UPLOAD_FILES
+            return
 
         # Создаем клавиатуру с предметами
         keyboard = []
         for subject in subjects:
             keyboard.append([InlineKeyboardButton(
-                subject['name'], 
+                f"📖 {subject['name']}", 
                 callback_data=f"mass_subject_{subject['id']}"
             )])
         
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_mass_upload")])
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="mass_cancel")])
 
         files_list = "\n".join([f"• {f['file_name']}" for f in upload_data['files'][:5]])
         if len(upload_data['files']) > 5:
             files_list += f"\n• ... и еще {len(upload_data['files']) - 5} файлов"
 
         await query.edit_message_text(
-            f"📚 Массовая загрузка\n\n"
+            f"📚 **Массовая загрузка**\n\n"
             f"📊 Файлов: {len(upload_data['files'])}\n"
             f"📄 Файлы:\n{files_list}\n\n"
-            f"Выберите предмет для загрузки:",
+            f"**Выберите предмет для загрузки:**",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        return SELECT_SUBJECT
 
     async def select_subject(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Выбор предмета"""
         user_id = query.from_user.id
-        subject_id = int(query.data.split('_')[-1])
         
-        upload_data = self.temp_uploads.get(user_id)
-        if not upload_data:
-            await query.answer("❌ Ошибка загрузки", show_alert=True)
-            return ConversationHandler.END
-
+        if not self.is_user_uploading(user_id):
+            await query.answer("❌ Нет активной массовой загрузки", show_alert=True)
+            return
+        
+        try:
+            subject_id = int(query.data.split('_')[-1])
+        except (ValueError, IndexError):
+            await query.answer("❌ Ошибка выбора предмета", show_alert=True)
+            return
+        
+        upload_data = self.upload_sessions[user_id]
         upload_data['subject_id'] = subject_id
         subject_name = self.db.get_subject_name(subject_id)
 
         await query.edit_message_text(
-            f"📚 Массовая загрузка\n\n"
-            f"📝 Предмет: {subject_name}\n"
+            f"📚 **Массовая загрузка**\n\n"
+            f"📝 Предмет: **{subject_name}**\n"
             f"📊 Файлов: {len(upload_data['files'])}\n\n"
-            f"Выберите тип материалов:",
+            f"**Выберите тип материалов:**",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📖 Лекции", callback_data="mass_type_lecture")],
                 [InlineKeyboardButton("📝 Практические", callback_data="mass_type_practice")],
                 [InlineKeyboardButton("📚 Доп. материалы", callback_data="mass_type_material")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="mass_back_subject")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="cancel_mass_upload")]
+                [InlineKeyboardButton("🔙 Назад к предметам", callback_data="mass_back_subjects")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="mass_cancel")]
             ])
         )
-        return SELECT_TYPE
 
     async def select_type(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Выбор типа материалов"""
         user_id = query.from_user.id
-        file_type = query.data.split('_')[-1]
         
-        upload_data = self.temp_uploads.get(user_id)
-        if not upload_data:
-            await query.answer("❌ Ошибка загрузки", show_alert=True)
-            return ConversationHandler.END
+        if not self.is_user_uploading(user_id):
+            await query.answer("❌ Нет активной массовой загрузки", show_alert=True)
+            return
+        
+        try:
+            file_type = query.data.split('_')[-1]
+        except IndexError:
+            await query.answer("❌ Ошибка выбора типа", show_alert=True)
+            return
+        
+        upload_data = self.upload_sessions[user_id]
+
+        # Проверяем допустимость типа файла
+        valid_types = {'lecture', 'practice', 'material'}
+        if file_type not in valid_types:
+            await query.answer("❌ Неверный тип файла", show_alert=True)
+            return
 
         upload_data['file_type'] = file_type
         subject_name = self.db.get_subject_name(upload_data['subject_id'])
-        type_names = {'lecture': 'Лекции', 'practice': 'Практические', 'material': 'Доп. материалы'}
+        type_names = {
+            'lecture': '📖 Лекции', 
+            'practice': '📝 Практические', 
+            'material': '📚 Доп. материалы'
+        }
 
         files_list = "\n".join([f"• {f['file_name']}" for f in upload_data['files'][:5]])
         if len(upload_data['files']) > 5:
             files_list += f"\n• ... и еще {len(upload_data['files']) - 5} файлов"
 
         await query.edit_message_text(
-            f"📚 Массовая загрузка\n\n"
-            f"📝 Предмет: {subject_name}\n"
-            f"📁 Тип: {type_names[file_type]}\n"
-            f"📊 Файлов: {len(upload_data['files'])}\n\n"
-            f"📄 Файлы:\n{files_list}\n\n"
-            f"Подтвердите загрузку:",
+            f"📚 **Массовая загрузка**\n\n"
+            f"📝 Предмет: **{subject_name}**\n"
+            f"📁 Тип: **{type_names[file_type]}**\n"
+            f"📊 Файлов: **{len(upload_data['files'])}**\n\n"
+            f"📄 **Файлы:**\n{files_list}\n\n"
+            f"**Подтвердите загрузку:**",
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Начать загрузку", callback_data="mass_upload_confirm")],
-                [InlineKeyboardButton("🔙 Назад", callback_data="mass_back_type")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="cancel_mass_upload")]
+                [InlineKeyboardButton("✅ Начать загрузку", callback_data="mass_confirm")],
+                [InlineKeyboardButton("🔙 Назад к типам", callback_data="mass_back_types")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="mass_cancel")]
             ])
         )
-        return CONFIRM_UPLOAD
 
     async def confirm_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Финальное подтверждение и загрузка файлов"""
         user_id = query.from_user.id
-        upload_data = self.temp_uploads.get(user_id)
         
-        if not upload_data:
-            await query.answer("❌ Ошибка загрузки", show_alert=True)
-            return ConversationHandler.END
+        if not self.is_user_uploading(user_id):
+            await query.answer("❌ Нет активной массовой загрузки", show_alert=True)
+            return
+
+        upload_data = self.upload_sessions[user_id]
 
         await query.edit_message_text(
-            f"🔄 Начинаю загрузку...\n\n"
+            f"🔄 **Начинаю загрузку...**\n\n"
             f"📊 Файлов: {len(upload_data['files'])}\n"
             f"⏳ Это займет некоторое время...",
-            reply_markup=None
+            parse_mode='Markdown'
         )
 
         success_count = 0
@@ -8488,18 +8680,18 @@ class MassUploadHandler:
         # Загружаем файлы по одному
         for i, file_data in enumerate(upload_data['files'], 1):
             try:
-                # Обновляем прогресс каждые 5 файлов
-                if i % 5 == 0 or i == len(upload_data['files']):
+                # Обновляем прогресс каждые 3 файла
+                if i % 3 == 0 or i == len(upload_data['files']):
                     progress = int((i / len(upload_data['files'])) * 20)
                     progress_bar = "[" + "█" * progress + "▒" * (20 - progress) + "]"
                     
                     await query.edit_message_text(
-                        f"🔄 Загружаю файлы...\n\n"
+                        f"🔄 **Загружаю файлы...**\n\n"
                         f"📊 Прогресс: {i}/{len(upload_data['files'])}\n"
                         f"{progress_bar} {int((i/len(upload_data['files']))*100)}%\n\n"
                         f"✅ Успешно: {success_count}\n"
                         f"❌ Ошибок: {error_count}",
-                        reply_markup=None
+                        parse_mode='Markdown'
                     )
 
                 # Загружаем файл
@@ -8518,78 +8710,107 @@ class MassUploadHandler:
                     errors.append(f"{file_data['file_name']}: {result.get('error', 'Неизвестная ошибка')}")
 
                 # Небольшая задержка чтобы не перегружать сервер
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.5)
 
             except Exception as e:
                 error_count += 1
                 errors.append(f"{file_data['file_name']}: {str(e)}")
 
         # Формируем итоговое сообщение
-        message = f"✅ Загрузка завершена!\n\n"
-        message += f"📊 Результаты:\n"
-        message += f"✅ Успешно: {success_count}\n"
-        message += f"❌ Ошибок: {error_count}\n"
+        message = f"✅ **Загрузка завершена!**\n\n"
+        message += f"📊 **Результаты:**\n"
+        message += f"✅ Успешно: **{success_count}**\n"
+        message += f"❌ Ошибок: **{error_count}**\n"
 
         if errors and error_count > 0:
-            error_list = "\n".join(errors[:3])
-            if error_count > 3:
-                error_list += f"\n... и еще {error_count - 3} ошибок"
-            message += f"\n❌ Ошибки:\n{error_list}"
+            error_list = "\n".join(errors[:5])
+            if error_count > 5:
+                error_list += f"\n... и еще {error_count - 5} ошибок"
+            message += f"\n❌ **Ошибки:**\n{error_list}"
 
-        # Очищаем временные данные
-        if user_id in self.temp_uploads:
-            del self.temp_uploads[user_id]
+        # Очищаем сессию
+        if user_id in self.upload_sessions:
+            del self.upload_sessions[user_id]
 
         await query.edit_message_text(
             message,
+            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📤 Новая загрузка", callback_data="mass_upload_start")],
+                [InlineKeyboardButton("📤 Новая загрузка", callback_data="mass_upload")],
                 [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
             ])
         )
-
-        return ConversationHandler.END
 
     async def navigate_back(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Навигация назад"""
         user_id = query.from_user.id
         back_to = query.data.split('_')[-1]
         
-        if back_to == 'subject':
-            return await self.finish_upload(query, context)
-        elif back_to == 'type':
-            upload_data = self.temp_uploads.get(user_id)
-            if upload_data and upload_data['subject_id']:
-                # Возвращаемся к выбору предмета
-                temp_query = type('obj', (object,), {
-                    'from_user': query.from_user,
-                    'message': query.message,
-                    'data': f"mass_subject_{upload_data['subject_id']}"
-                })()
-                return await self.select_subject(temp_query, context)
-        
-        return ConversationHandler.END
+        if back_to == 'subjects':
+            await self.finish_upload(query, context)
+        elif back_to == 'types':
+            if self.is_user_uploading(user_id):
+                upload_data = self.upload_sessions[user_id]
+                if 'subject_id' in upload_data:
+                    # Создаем временный query для возврата к выбору предмета
+                    class TempQuery:
+                        def __init__(self, user, message, subject_id):
+                            self.from_user = user
+                            self.message = message
+                            self.data = f"mass_subject_{subject_id}"
+                    
+                    temp_query = TempQuery(query.from_user, query.message, upload_data['subject_id'])
+                    await self.select_subject(temp_query, context)
+        else:
+            await self.cancel_upload(query, context)
 
     async def cancel_upload(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Отмена загрузки"""
         user_id = query.from_user.id
         
-        if user_id in self.temp_uploads:
-            del self.temp_uploads[user_id]
+        if self.is_user_uploading(user_id):
+            files_count = len(self.upload_sessions[user_id]['files'])
+            del self.upload_sessions[user_id]
+            await query.edit_message_text(
+                f"❌ Массовая загрузка отменена.\n"
+                f"📊 Удалено файлов из очереди: {files_count}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Нет активной массовой загрузки.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+
+    async def cancel_upload_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отмена загрузки через команду /cancel"""
+        user_id = update.effective_user.id
         
-        await query.edit_message_text(
-            "❌ Массовая загрузка отменена.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
-            ])
-        )
-        return ConversationHandler.END
+        if self.is_user_uploading(user_id):
+            files_count = len(self.upload_sessions[user_id]['files'])
+            del self.upload_sessions[user_id]
+            await update.message.reply_text(
+                f"❌ Массовая загрузка отменена.\n"
+                f"📊 Удалено файлов из очереди: {files_count}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚙️ Админ-панель", callback_data="admin_panel")]
+                ])
+            )
+        else:
+            await update.message.reply_text("❌ Нет активной массовой загрузки.")
 
 
 
 
 
-    
+
+
+
+
 
     async def delete_lectures_menu(self, query, context: ContextTypes.DEFAULT_TYPE):
         """Меню удаления лекций"""
