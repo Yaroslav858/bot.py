@@ -125,19 +125,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-BOT_TOKEN = "8311052967:AAFqqTJw0QP4nGTuOhZXuR0j1xx1DtJVMdQ"
 
-ADMIN_IDS = [6424735984]
-SUPPORT_GROUP_ID = "@moto_angel1"
 
-# Hugging Face настройки (резервный вариант)
-HUGGINGFACE_API_KEY = "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"
-HUGGING_FACE_MODELS = [
-    "microsoft/DialoGPT-medium",
-    "microsoft/DialoGPT-small", 
-    "microsoft/DialoGPT-large",
-    "facebook/blenderbot-400M-distill"
-]
 
 # ДОБАВЬТЕ ЭТУ ФУНКЦИЮ В НАЧАЛО ФАЙЛА (после импортов)
 def safe_len(obj):
@@ -11030,3 +11019,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
